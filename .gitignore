@@ -1,0 +1,10 @@
+# Your data stays on your computer and never goes into the repo.
+data/
+*.db
+*.csv
+!tests/fixtures/*.csv
+
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
