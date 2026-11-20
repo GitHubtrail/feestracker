@@ -67,3 +67,43 @@ def test_reimport_updates_instead_of_duplicating(conn):
 
 def test_problems_listed(conn):
     assert {p["number"] for p in reports.problems(conn)} == {"1005", "1006"}
+
+
+def test_bad_debt_moves_money_out_of_owed(conn):
+    assert db.mark_bad_debt(conn, "1003", "client moved away")
+    s = reports.summary(conn)
+    assert s.outstanding_cents == 95600  # 155600 minus the 60000 written off
+    assert (s.written_off_cents, s.written_off_invoices) == (60000, 1)
+    assert s.clients_owing == 2  # Rivera still owes on invoice 1004
+
+    years = {r["year"]: r for r in reports.by_year(conn)}
+    assert (years["2022"]["outstanding"], years["2022"]["written_off"]) == (0, 60000)
+
+    rivera = {c["client"]: c for c in reports.who_owes(conn, TODAY)}["Rivera Maria"]
+    assert rivera["owed"] == 15000 and rivera["over_1y"] == 0
+    assert reports.who_owes(conn, TODAY, "2022") == []
+
+    [bad] = reports.bad_debts(conn)
+    assert (bad["number"], bad["written_off_cents"], bad["note"]) == ("1003", 60000, "client moved away")
+
+
+def test_bad_debt_survives_reimport_and_can_be_undone(conn):
+    db.mark_bad_debt(conn, "1003")
+    db.save_invoices(conn, read_invoices(FIXTURE), FIXTURE.name)
+    assert reports.summary(conn).written_off_cents == 60000
+
+    db.unmark_bad_debt(conn, "1003")
+    s = reports.summary(conn)
+    assert (s.outstanding_cents, s.written_off_cents) == (155600, 0)
+    assert reports.bad_debts(conn) == []
+
+
+def test_bad_debt_needs_a_real_invoice(conn):
+    assert not db.mark_bad_debt(conn, "nope")
+    assert reports.bad_debts(conn) == []
+
+
+def test_bad_debt_later_paid_counts_nothing(conn):
+    db.mark_bad_debt(conn, "1001")  # already paid
+    s = reports.summary(conn)
+    assert s.written_off_cents == 0 and s.outstanding_cents == 155600

@@ -54,6 +54,23 @@ CREATE TABLE IF NOT EXISTS payments (
     PRIMARY KEY (invoice_number, position)
 );
 
+-- Invoices you have decided will never be paid. Kept apart from the imported
+-- data (and keyed only by invoice number) so a new import never loses them.
+CREATE TABLE IF NOT EXISTS bad_debts (
+    invoice_number TEXT PRIMARY KEY,
+    marked_at      TEXT NOT NULL,
+    note           TEXT NOT NULL DEFAULT ''
+);
+
+-- What the reports read: each invoice, with its unpaid balance split into
+-- money still owed and money written off as bad debt.
+CREATE VIEW IF NOT EXISTS invoice_view AS
+SELECT i.*,
+       b.invoice_number IS NOT NULL AS bad_debt,
+       CASE WHEN b.invoice_number IS NULL THEN i.balance_cents ELSE 0 END AS owed_cents,
+       CASE WHEN b.invoice_number IS NULL THEN 0 ELSE i.balance_cents END AS written_off_cents
+FROM invoices i LEFT JOIN bad_debts b ON b.invoice_number = i.number;
+
 CREATE TABLE IF NOT EXISTS imports (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     source      TEXT NOT NULL,
@@ -123,3 +140,21 @@ def save_invoices(
             (source, datetime.now().isoformat(timespec="seconds"), added + updated, added, updated),
         )
     return {"invoices": added + updated, "added": added, "updated": updated}
+
+
+def mark_bad_debt(conn: sqlite3.Connection, number: str, note: str = "") -> bool:
+    """Write an invoice off as bad debt. Returns False if there is no such invoice."""
+    if not conn.execute("SELECT 1 FROM invoices WHERE number = ?", (number,)).fetchone():
+        return False
+    with conn:
+        conn.execute(
+            """INSERT INTO bad_debts (invoice_number, marked_at, note) VALUES (?, ?, ?)
+               ON CONFLICT(invoice_number) DO UPDATE SET note = excluded.note""",
+            (number, datetime.now().isoformat(timespec="seconds"), note.strip()),
+        )
+    return True
+
+
+def unmark_bad_debt(conn: sqlite3.Connection, number: str) -> None:
+    with conn:
+        conn.execute("DELETE FROM bad_debts WHERE invoice_number = ?", (number,))

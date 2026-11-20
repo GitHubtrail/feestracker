@@ -39,6 +39,8 @@ class Summary:
     outstanding_cents: int
     open_invoices: int
     clients_owing: int
+    written_off_cents: int
+    written_off_invoices: int
     last_import: str
 
 
@@ -47,10 +49,12 @@ def summary(conn: sqlite3.Connection) -> Summary:
         """SELECT COUNT(*) AS n,
                   COALESCE(SUM(total_cents), 0) AS billed,
                   COALESCE(SUM(paid_cents), 0) AS collected,
-                  COALESCE(SUM(balance_cents), 0) AS outstanding,
-                  COALESCE(SUM(balance_cents > 0), 0) AS open_n,
-                  COUNT(DISTINCT CASE WHEN balance_cents > 0 THEN client END) AS owing
-           FROM invoices"""
+                  COALESCE(SUM(owed_cents), 0) AS outstanding,
+                  COALESCE(SUM(owed_cents > 0), 0) AS open_n,
+                  COUNT(DISTINCT CASE WHEN owed_cents > 0 THEN client END) AS owing,
+                  COALESCE(SUM(written_off_cents), 0) AS written_off,
+                  COALESCE(SUM(written_off_cents > 0), 0) AS written_off_n
+           FROM invoice_view"""
     ).fetchone()
     last = conn.execute("SELECT imported_at FROM imports ORDER BY id DESC LIMIT 1").fetchone()
     return Summary(
@@ -60,6 +64,8 @@ def summary(conn: sqlite3.Connection) -> Summary:
         outstanding_cents=row["outstanding"],
         open_invoices=row["open_n"],
         clients_owing=row["owing"],
+        written_off_cents=row["written_off"],
+        written_off_invoices=row["written_off_n"],
         last_import=last["imported_at"] if last else "",
     )
 
@@ -71,10 +77,11 @@ def by_year(conn: sqlite3.Connection) -> list[dict]:
                   COUNT(*) AS invoices,
                   SUM(total_cents) AS billed,
                   SUM(paid_cents) AS collected,
-                  SUM(balance_cents) AS outstanding,
-                  SUM(balance_cents > 0) AS open_invoices,
-                  COUNT(DISTINCT CASE WHEN balance_cents > 0 THEN client END) AS clients_owing
-           FROM invoices
+                  SUM(owed_cents) AS outstanding,
+                  SUM(owed_cents > 0) AS open_invoices,
+                  COUNT(DISTINCT CASE WHEN owed_cents > 0 THEN client END) AS clients_owing,
+                  SUM(written_off_cents) AS written_off
+           FROM invoice_view
            GROUP BY year
            ORDER BY year DESC"""
     ).fetchall()
@@ -83,7 +90,7 @@ def by_year(conn: sqlite3.Connection) -> list[dict]:
 
 def who_owes(conn: sqlite3.Connection, today: date, year: str | None = None) -> list[dict]:
     """Every client with money still owed, biggest balance first, split by age."""
-    sql = "SELECT client, invoice_date, balance_cents FROM invoices WHERE balance_cents > 0"
+    sql = "SELECT client, invoice_date, owed_cents FROM invoice_view WHERE owed_cents > 0"
     params: list = []
     if year:
         sql += " AND substr(invoice_date, 1, 4) = ?"
@@ -95,10 +102,10 @@ def who_owes(conn: sqlite3.Connection, today: date, year: str | None = None) -> 
             {"client": r["client"], "owed": 0, "invoices": 0, "oldest": r["invoice_date"]}
             | {key: 0 for key, *_ in AGE_BUCKETS},
         )
-        c["owed"] += r["balance_cents"]
+        c["owed"] += r["owed_cents"]
         c["invoices"] += 1
         c["oldest"] = min(c["oldest"], r["invoice_date"])
-        c[age_bucket(r["invoice_date"], today)] += r["balance_cents"]
+        c[age_bucket(r["invoice_date"], today)] += r["owed_cents"]
     return sorted(clients.values(), key=lambda c: (-c["owed"], c["client"]))
 
 
@@ -112,7 +119,7 @@ def who_paid(conn: sqlite3.Connection, year: str | None = None) -> list[dict]:
                     SUM(paid_cents) AS paid,
                     COUNT(*) AS invoices,
                     MAX(paid_at) AS last_paid
-             FROM invoices
+             FROM invoice_view
              WHERE paid_cents > 0"""
     params: list = []
     if year:
@@ -125,9 +132,9 @@ def who_paid(conn: sqlite3.Connection, year: str | None = None) -> list[dict]:
 
 def years(conn: sqlite3.Connection) -> list[str]:
     rows = conn.execute(
-        """SELECT DISTINCT substr(invoice_date, 1, 4) AS y FROM invoices WHERE invoice_date != ''
+        """SELECT DISTINCT substr(invoice_date, 1, 4) AS y FROM invoice_view WHERE invoice_date != ''
            UNION
-           SELECT DISTINCT substr(paid_at, 1, 4) FROM invoices WHERE paid_at != ''
+           SELECT DISTINCT substr(paid_at, 1, 4) FROM invoice_view WHERE paid_at != ''
            ORDER BY 1 DESC"""
     ).fetchall()
     return [r[0] for r in rows]
@@ -136,8 +143,8 @@ def years(conn: sqlite3.Connection) -> list[str]:
 def clients(conn: sqlite3.Connection, search: str = "") -> list[dict]:
     rows = conn.execute(
         """SELECT client, COUNT(*) AS invoices, SUM(total_cents) AS billed,
-                  SUM(paid_cents) AS paid, SUM(balance_cents) AS owed
-           FROM invoices
+                  SUM(paid_cents) AS paid, SUM(owed_cents) AS owed
+           FROM invoice_view
            WHERE client LIKE ? ESCAPE '\\'
            GROUP BY client ORDER BY client COLLATE NOCASE""",
         ("%" + search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%",),
@@ -147,7 +154,7 @@ def clients(conn: sqlite3.Connection, search: str = "") -> list[dict]:
 
 def client_invoices(conn: sqlite3.Connection, client: str) -> list[dict]:
     rows = conn.execute(
-        """SELECT * FROM invoices WHERE client = ? ORDER BY invoice_date DESC, number DESC""",
+        """SELECT * FROM invoice_view WHERE client = ? ORDER BY invoice_date DESC, number DESC""",
         (client,),
     ).fetchall()
     out = []
@@ -164,9 +171,24 @@ def client_invoices(conn: sqlite3.Connection, client: str) -> list[dict]:
     return out
 
 
+def bad_debts(conn: sqlite3.Connection) -> list[dict]:
+    """Invoices marked as bad debt, newest invoice first.
+
+    An invoice stays listed even if it was later paid, so a mark can be undone,
+    but only the unpaid part counts as written off.
+    """
+    rows = conn.execute(
+        """SELECT v.number, v.client, v.status, v.invoice_date, v.total_cents, v.paid_cents,
+                  v.balance_cents, v.written_off_cents, b.marked_at, b.note
+           FROM invoice_view v JOIN bad_debts b ON b.invoice_number = v.number
+           ORDER BY v.invoice_date DESC, v.number DESC"""
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def problems(conn: sqlite3.Connection) -> list[dict]:
     rows = conn.execute(
-        """SELECT number, client, status, invoice_date, problems FROM invoices
+        """SELECT number, client, status, invoice_date, problems FROM invoice_view
            WHERE problems != '' ORDER BY invoice_date DESC"""
     ).fetchall()
     return [dict(r) for r in rows]
