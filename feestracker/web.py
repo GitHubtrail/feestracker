@@ -57,6 +57,10 @@ textarea { width:100%; padding:10px; border-radius:8px; border:1px solid var(--l
 .note { background:var(--card); border:1px solid var(--line); border-left:4px solid var(--accent);
         border-radius:8px; padding:10px 14px; margin:0 0 16px }
 .small { font-size:14px }
+form.act { margin:6px 0 0 }
+form.act button { background:transparent; color:var(--accent); border:1px solid var(--line);
+                  padding:2px 10px; font-size:13px }
+.pill.bad { color:var(--muted); background:var(--bg) }
 """
 
 NAV = [
@@ -65,8 +69,13 @@ NAV = [
     ("/paid", "Who paid"),
     ("/clients", "All clients"),
     ("/import", "Import"),
+    ("/bad-debts", "Bad debts"),
     ("/checks", "Data checks"),
 ]
+
+
+def count(n: int, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
 
 
 def money(cents: int | None) -> str:
@@ -128,6 +137,9 @@ def home(conn: sqlite3.Connection, today: date) -> bytes:
       <div class=card><div class=label>Billed</div>
         <div class=big>{money(s.billed_cents)}</div>
         <div class="small muted">{s.invoices} invoices</div></div>
+      <div class=card><div class=label>Written off as bad debt</div>
+        <div class="big muted">{money(s.written_off_cents)}</div>
+        <div class="small muted"><a href="/bad-debts">{count(s.written_off_invoices, 'invoice')}</a></div></div>
     </div>"""
     age_rows = "".join(
         f"<tr><td>{label}</td><td class=n>{money(ages[key])}</td></tr>"
@@ -137,6 +149,7 @@ def home(conn: sqlite3.Connection, today: date) -> bytes:
         f"""<tr><td><b>{escape(y['year'])}</b></td><td class=n>{y['invoices']}</td>
             <td class=n>{money(y['billed'])}</td><td class="n ok">{money(y['collected'])}</td>
             <td class="n owe">{money(y['outstanding'])}</td>
+            <td class="n muted">{money(y['written_off'])}</td>
             <td class=n><a href="/owes?year={quote(y['year'])}">{y['clients_owing']} clients</a></td></tr>"""
         for y in reports.by_year(conn)
     )
@@ -151,7 +164,7 @@ def home(conn: sqlite3.Connection, today: date) -> bytes:
     <h2>Year by year</h2>
     <div class=wrap><table><thead><tr><th>Invoice year</th><th class=n>Invoices</th>
       <th class=n>Billed</th><th class=n>Collected</th><th class=n>Still owed</th>
-      <th class=n>Clients owing</th></tr></thead><tbody>{year_rows}</tbody></table></div>
+      <th class=n>Bad debt</th><th class=n>Clients owing</th></tr></thead><tbody>{year_rows}</tbody></table></div>
     <h2>How old is the money owed?</h2>
     <div class=wrap><table><tbody>{age_rows}</tbody></table></div>
     <h2>Biggest balances</h2>
@@ -253,11 +266,11 @@ def reminder_text(client: str, open_invoices: list[dict]) -> str:
         what = ", ".join(li["title"] for li in inv["services"] if li["kind"] == "service")
         lines.append(
             f"  • Invoice {inv['number']} dated {inv['invoice_date'][:10]}: "
-            f"{money(inv['balance_cents'])}" + (f" ({what})" if what else "")
+            f"{money(inv['owed_cents'])}" + (f" ({what})" if what else "")
         )
     lines += [
         "",
-        f"Total due: {money(sum(i['balance_cents'] for i in open_invoices))}",
+        f"Total due: {money(sum(i['owed_cents'] for i in open_invoices))}",
         "",
         "You can pay through your client portal. Please reply if you have any questions",
         "or if you have already paid.",
@@ -273,8 +286,9 @@ def client_page(conn: sqlite3.Connection, today: date, name: str) -> bytes:
         return page("Client", "<h1>Client not found</h1><p><a href='/clients'>All clients</a></p>")
     billed = sum(i["total_cents"] for i in invoices)
     paid_ = sum(i["paid_cents"] for i in invoices)
-    owed = sum(i["balance_cents"] for i in invoices)
-    open_invs = [i for i in invoices if i["balance_cents"] > 0]
+    owed = sum(i["owed_cents"] for i in invoices)
+    written_off = sum(i["written_off_cents"] for i in invoices)
+    open_invs = [i for i in invoices if i["owed_cents"] > 0]
     rows = []
     for i in invoices:
         services = "<br>".join(
@@ -282,7 +296,7 @@ def client_page(conn: sqlite3.Connection, today: date, name: str) -> bytes:
             for li in i["services"]
         )
         age = ""
-        if i["balance_cents"] > 0:
+        if i["owed_cents"] > 0:
             label = dict((k, lbl) for k, lbl, *_ in reports.AGE_BUCKETS)[
                 reports.age_bucket(i["invoice_date"], today)
             ]
@@ -292,7 +306,7 @@ def client_page(conn: sqlite3.Connection, today: date, name: str) -> bytes:
             f"<td><span class='pill {STATUS_CLASS.get(i['status'], '')}'>{escape(i['status'])}</span>{age}</td>"
             f"<td class=small>{services}</td><td class=n>{money(i['total_cents'])}</td>"
             f"<td class='n ok'>{money(i['paid_cents'])}</td>"
-            f"<td class='n {'owe' if i['balance_cents'] else 'muted'}'>{money(i['balance_cents'])}</td></tr>"
+            f"<td class=n>{owes_cell(i, name)}</td></tr>"
         )
     reminder = ""
     if open_invs:
@@ -306,7 +320,8 @@ def client_page(conn: sqlite3.Connection, today: date, name: str) -> bytes:
     <h1>{escape(name)}</h1>
     <div class=cards>
       <div class=card><div class=label>Owes</div><div class="big {'owe' if owed else 'muted'}">{money(owed)}</div>
-        <div class="small muted">{len(open_invs)} open invoices</div></div>
+        <div class="small muted">{len(open_invs)} open invoices</div>
+        {f'<div class="small muted">{money(written_off)} written off as bad debt</div>' if written_off else ''}</div>
       <div class=card><div class=label>Paid</div><div class="big ok">{money(paid_)}</div></div>
       <div class=card><div class=label>Billed</div><div class=big>{money(billed)}</div>
         <div class="small muted">{len(invoices)} invoices</div></div>
@@ -317,6 +332,72 @@ def client_page(conn: sqlite3.Connection, today: date, name: str) -> bytes:
       <th class=n>Total</th><th class=n>Paid</th><th class=n>Owes</th></tr></thead>
       <tbody>{''.join(rows)}</tbody></table></div>"""
     return page(name, body)
+
+
+def bad_debt_button(number: str, mark: bool, back: str) -> str:
+    """A small form button that marks or unmarks one invoice as bad debt."""
+    if mark:
+        label, confirm = "Mark as bad debt", "Write this invoice off as bad debt? You can undo this later."
+    else:
+        label, confirm = "Undo bad debt", ""
+    onsubmit = f' onsubmit="return confirm({escape(repr(confirm))})"' if confirm else ""
+    return (
+        f'<form class=act method=post action="/bad-debt"{onsubmit}>'
+        f'<input type=hidden name=number value="{escape(number)}">'
+        f'<input type=hidden name=action value="{"mark" if mark else "unmark"}">'
+        f'<input type=hidden name=back value="{escape(back)}">'
+        f"<button>{label}</button></form>"
+    )
+
+
+def owes_cell(inv: dict, client: str) -> str:
+    back = "/client?name=" + quote(client)
+    if inv["bad_debt"]:
+        return (
+            f"<span class=muted>{money(inv['written_off_cents'])}</span><br>"
+            "<span class='pill bad'>bad debt</span>"
+            + bad_debt_button(inv["number"], False, back)
+        )
+    if inv["owed_cents"] > 0:
+        return f"<span class=owe>{money(inv['owed_cents'])}</span>" + bad_debt_button(
+            inv["number"], True, back
+        )
+    return f"<span class=muted>{money(0)}</span>"
+
+
+def bad_debts_page(conn: sqlite3.Connection) -> bytes:
+    found = reports.bad_debts(conn)
+    total = sum(b["written_off_cents"] for b in found)
+    by_year: dict[str, int] = {}
+    for b in found:
+        y = b["invoice_date"][:4] or "No date"
+        by_year[y] = by_year.get(y, 0) + b["written_off_cents"]
+    rows = "".join(
+        f"<tr><td>{escape(b['number'])}</td><td>{client_link(b['client'])}</td>"
+        f"<td>{escape(b['invoice_date'][:10])}</td><td class=n>{money(b['total_cents'])}</td>"
+        f"<td class='n ok'>{money(b['paid_cents'])}</td>"
+        f"<td class='n muted'>{money(b['written_off_cents'])}</td>"
+        f"<td class='small muted'>{escape(b['marked_at'][:10])}</td>"
+        f"<td>{bad_debt_button(b['number'], False, '/bad-debts')}</td></tr>"
+        for b in found
+    )
+    year_rows = "".join(
+        f"<tr><td>{escape(y)}</td><td class=n>{money(c)}</td></tr>"
+        for y, c in sorted(by_year.items(), reverse=True)
+    )
+    body = f"""<h1>Bad debts</h1>
+    <p class=muted>Invoices you have written off because they will never be paid. They are left out
+      of "owed" everywhere and counted here instead. To write one off, open the client and click
+      <b>Mark as bad debt</b> next to the invoice. Your choices are kept when you import a new export.</p>
+    <div class=cards><div class=card><div class=label>Written off</div>
+      <div class="big muted">{money(total)}</div>
+      <div class="small muted">{count(len(found), 'invoice')}</div></div></div>
+    {'<h2>By invoice year</h2><div class=wrap><table><tbody>' + year_rows + '</tbody></table></div>' if found else ''}
+    <h2>Invoices</h2>
+    <div class=wrap><table><thead><tr><th>Invoice</th><th>Client</th><th>Date</th><th class=n>Total</th>
+      <th class=n>Paid</th><th class=n>Written off</th><th>Marked on</th><th></th></tr></thead>
+      <tbody>{rows or '<tr><td colspan=8 class=muted>No bad debts.</td></tr>'}</tbody></table></div>"""
+    return page("Bad debts", body, "/bad-debts")
 
 
 def import_page(message: str = "") -> bytes:
@@ -408,13 +489,29 @@ def make_handler(db_path: Path, today_fn=date.today):
                     self._send(import_page())
                 elif url.path == "/checks":
                     self._send(checks(conn))
+                elif url.path == "/bad-debts":
+                    self._send(bad_debts_page(conn))
                 else:
                     self._send(page("Not found", "<h1>Page not found</h1>"), status=HTTPStatus.NOT_FOUND)
             finally:
                 conn.close()
 
+        def _same_origin(self) -> bool:
+            """Refuse form posts sent by other websites open in the same browser."""
+            origin = self.headers.get("Origin") or self.headers.get("Referer")
+            if not origin:
+                return True
+            return urlparse(origin).netloc == self.headers.get("Host", "")
+
         def do_POST(self):
-            if urlparse(self.path).path != "/import":
+            path = urlparse(self.path).path
+            if not self._same_origin():
+                self._send(page("Not allowed", "<h1>Not allowed</h1>"), status=HTTPStatus.FORBIDDEN)
+                return
+            if path == "/bad-debt":
+                self._bad_debt()
+                return
+            if path != "/import":
                 self._send(page("Not found", "<h1>Page not found</h1>"), status=HTTPStatus.NOT_FOUND)
                 return
             length = int(self.headers.get("Content-Length") or 0)
@@ -441,6 +538,25 @@ def make_handler(db_path: Path, today_fn=date.today):
                    f"{counts['added']} new, {counts['updated']} updated. "
                    "<a href='/'>See the summary →</a></div>")
             self._send(import_page(msg))
+
+        def _bad_debt(self):
+            length = min(int(self.headers.get("Content-Length") or 0), 10_000)
+            form = {k: v[0] for k, v in parse_qs(self.rfile.read(length).decode("utf-8")).items()}
+            number = form.get("number", "")
+            conn = db.connect(db_path)
+            try:
+                if form.get("action") == "unmark":
+                    db.unmark_bad_debt(conn, number)
+                elif not db.mark_bad_debt(conn, number, form.get("note", "")):
+                    self._send(page("Not found", "<h1>Invoice not found</h1>"),
+                               status=HTTPStatus.NOT_FOUND)
+                    return
+            finally:
+                conn.close()
+            back = form.get("back", "/")
+            if not back.startswith("/") or back.startswith("//"):
+                back = "/"
+            self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
 
     return Handler
 

@@ -16,6 +16,10 @@ folder next to the app and is never uploaded anywhere or added to this repositor
 - **Who paid**: clients ranked by what they paid, for all time or for one year.
 - **Each client**: all their invoices and services, plus a ready-to-send payment
   reminder listing their open invoices and the total due, with a Copy button.
+- **Bad debts**: on a client's page, click **Mark as bad debt** next to an invoice that will
+  never be paid. It is then left out of "owed" everywhere and shown on its own, in the
+  summary, the year-by-year table and the Bad debts page. Click **Undo bad debt** to bring
+  it back. Your marks are kept when you import a new export.
 - **Import**: load a new TaxDome export whenever you like. Existing invoices are
   updated and new ones are added, so nothing is counted twice.
 - **Data checks**: invoices where the TaxDome numbers don't add up, for example an
@@ -49,6 +53,8 @@ Do this again whenever you want fresh numbers.
   "Payment Received on 5/9/2026", which is how Zelle, cash and cheque payments are entered.
 - **Still owed** is billed minus collected, for invoices that are not marked paid.
   An invoice marked paid in TaxDome always counts as owing nothing.
+- **Bad debt** is what was still owed on invoices you marked as bad debt. If a client
+  pays one later, only what is left unpaid counts as written off.
 - **Age** is counted from the invoice date.
 - The **year** on the summary and on Who owes is the invoice's year. On Who paid it is the
   year the invoice was paid.

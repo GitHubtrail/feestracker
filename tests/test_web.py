@@ -81,3 +81,58 @@ def test_html_is_escaped(server, tmp_path):
     html = get(server + "/owes")
     assert "<script>x</script>" not in html
     assert "&lt;script&gt;x&lt;/script&gt;" in html
+
+
+def post_form(base, path, fields, headers=None):
+    from urllib.parse import urlencode
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+
+    req = urllib.request.Request(
+        base + path, data=urlencode(fields).encode(), method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded", **(headers or {})},
+    )
+    try:
+        with urllib.request.build_opener(NoRedirect).open(req) as r:
+            return r.status, r.headers
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers
+
+
+def test_mark_and_undo_bad_debt(server):
+    upload(server, FIXTURE.read_bytes())
+    assert "Mark as bad debt" in get(server + "/client?name=Rivera%20Maria")
+
+    status, headers = post_form(server, "/bad-debt", {
+        "number": "1003", "action": "mark", "back": "/client?name=Rivera%20Maria"})
+    assert status == 303 and headers["Location"] == "/client?name=Rivera%20Maria"
+
+    client = get(server + "/client?name=Rivera%20Maria")
+    assert "Undo bad debt" in client
+    assert "Total due: $150.00" in client  # the reminder leaves out the bad debt
+    assert "Invoice 1003" not in client.split("</textarea>")[0]
+
+    home = get(server + "/")
+    assert "$956.00" in home  # owed now
+    assert "Written off as bad debt" in home and "$600.00" in home
+    assert "1003" in get(server + "/bad-debts")
+
+    post_form(server, "/bad-debt", {"number": "1003", "action": "unmark", "back": "/bad-debts"})
+    assert "No bad debts." in get(server + "/bad-debts")
+    assert "$1,556.00" in get(server + "/")
+
+
+def test_bad_debt_rejects_other_sites_and_bad_redirects(server):
+    upload(server, FIXTURE.read_bytes())
+    status, _ = post_form(server, "/bad-debt", {"number": "1003", "action": "mark"},
+                          {"Origin": "https://evil.example"})
+    assert status == 403
+    assert "No bad debts." in get(server + "/bad-debts")
+
+    status, headers = post_form(server, "/bad-debt", {
+        "number": "1003", "action": "mark", "back": "//evil.example/"})
+    assert status == 303 and headers["Location"] == "/"
+    status, _ = post_form(server, "/bad-debt", {"number": "missing", "action": "mark"})
+    assert status == 404
