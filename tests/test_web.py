@@ -228,3 +228,66 @@ def test_tick_several_invoices(server):
     assert status == 400
     assert "Total due: $50.00" in get(server + back)
     assert post_multi(server, "/payment", [("action", "add"), ("paid_on", "2026-11-20")]) == 400
+
+
+def post_list(base, year, filename, data: bytes):
+    boundary = "----feestrackerlist"
+    body = (
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"year\"\r\n\r\n{year}\r\n"
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"
+        "Content-Type: text/csv\r\n\r\n"
+    ).encode() + data + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(
+        base + "/not-billed", data=body, method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+
+
+RETURN_LIST = (
+    "Return Name,First Name,Last Name,Spouse First Name,Spouse Last Name,Company Name,Type,SSN/EIN\n"
+    "Rivera Maria,Maria,Rivera,,,,1040,123-45-6789\n"
+    "Acme Bakery,,,,,Acme Bakery LLC,1120S,98-7654321\n"
+    "Sample Return,Sample,Client,,,,1040,000-00-0000\n"
+    "New Client,Pat,Newman,,,,1040,111-22-3333\n"
+).encode()
+
+
+def test_client_list_upload_keeps_only_names_and_touches_nothing_else(server, tmp_path):
+    upload(server, FIXTURE.read_bytes())
+    conn = db.connect(tmp_path / "web.db")
+    tables = ("invoices", "line_items", "manual_payments", "bad_debts")
+
+    def counts():
+        return {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in tables}
+
+    before = counts()
+    status, html = post_list(server, "2024", "clients.csv", RETURN_LIST)
+    assert status == 200 and "3 clients" in html
+    assert "Pat Newman" in html and "never changes your clients" in html
+    assert counts() == before
+    stored = " ".join(db.client_list_names(conn, "2024"))
+    assert "123-45" not in stored and "98-765" not in stored and "Sample" not in stored
+    dump = "\n".join(conn.iterdump())
+    assert "123-45-6789" not in dump and "98-7654321" not in dump
+
+    # Saving the year again replaces that year's list only.
+    post_list(server, "2023", "clients.csv", RETURN_LIST)
+    status, html = post_list(server, "2024", "c.csv", b"Name\nOnly One\n")
+    assert status == 200
+    assert db.client_list_names(conn, "2024") == ["Only One"]
+    assert len(db.client_list_names(conn, "2023")) == 3
+    assert counts() == before
+
+    csv_text = get(server + "/not-billed.csv?year=2024")
+    assert csv_text.splitlines()[0].startswith("Client,") and "Only One" in csv_text
+    conn.close()
+
+
+def test_client_list_needs_a_real_year(server):
+    status, html = post_list(server, "1999", "c.csv", b"Name\nA Person\n")
+    assert status == 400 and "choose a tax year" in html

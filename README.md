@@ -69,6 +69,18 @@ copies them into your current data without changing anything else.
 
 Do this again whenever you want fresh numbers.
 
+## See who you didn't bill for a tax year
+
+Open **Not billed**, pick the tax year, and choose the client list you exported from your
+tax software (Excel or CSV), or paste names one per line. The page lists everyone on that
+year's list who has no TaxDome invoice for that tax year.
+
+- An invoice counts for the tax year written on it ("Tax year 2024", "TY 2024",
+  "2024 tax return"). If none is written, it counts for the year before the invoice date.
+- Only client names are kept. SSNs, EINs, emails and addresses in the file are never saved.
+- Client lists are kept on their own. Saving one never changes your clients, invoices,
+  payments or bad debts, and saving a year again only replaces that year's list.
+
 ## How the numbers are worked out
 
 - **Billed** is the invoice's services minus its discounts.

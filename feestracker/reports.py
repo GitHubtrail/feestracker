@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+import re
 from datetime import date
+
+from . import db
+from .clientlists import Matcher
 
 
 # Age buckets for money still owed, counted from the invoice date.
@@ -311,3 +315,59 @@ def unpaid_by_years(conn: sqlite3.Connection, years: list[str]) -> list[dict]:
 def _last_paid(conn: sqlite3.Connection) -> dict[str, str]:
     return {r[0]: r[1] or "" for r in conn.execute(
         "SELECT client, MAX(NULLIF(paid_at, '')) FROM invoice_view WHERE paid_cents > 0 GROUP BY client")}
+
+
+# The tax year an invoice is for: a year written in its services or description
+# ("Tax year 2024", "TY 2024", "2024 tax return"), otherwise the year before the
+# invoice date, because a year's returns are usually billed the next year.
+TAX_YEAR = re.compile(
+    r"(?:tax\s*year|\bty|\bfy|year)\s*[-:]?\s*(20\d\d)\b"
+    r"|(20\d\d)\s*(?:tax|return|1040|1120|1065|federal|fed\b|state)", re.I)
+
+
+def tax_years_of(text: str, invoice_date: str) -> set[str]:
+    named = {a or b for a, b in TAX_YEAR.findall(text)}
+    if named:
+        return named
+    return {str(int(invoice_date[:4]) - 1)} if invoice_date[:4].isdigit() else set()
+
+
+def client_tax_years(conn: sqlite3.Connection) -> dict[str, set[str]]:
+    """Per TaxDome client, the tax years they have been invoiced for."""
+    titles: dict[str, list[str]] = {}
+    for r in conn.execute("SELECT invoice_number, title FROM line_items WHERE kind = 'service'"):
+        titles.setdefault(r["invoice_number"], []).append(r["title"])
+    out: dict[str, set[str]] = {}
+    for r in conn.execute("SELECT number, client, invoice_date, description FROM invoices"):
+        text = (r["description"] or "") + "\n" + "\n".join(titles.get(r["number"], []))
+        out.setdefault(r["client"], set()).update(tax_years_of(text, r["invoice_date"]))
+    return out
+
+
+def not_billed(conn: sqlite3.Connection, year: str) -> dict:
+    """Clients on the client list for a tax year who have no invoice for that tax year.
+
+    Clients in TaxDome come first, then names that may be in TaxDome under another
+    spelling, then clients with no TaxDome invoices at all.
+    """
+    names = db.client_list_names(conn, year)
+    years = client_tax_years(conn)
+    owed = {r["client"]: r["owed"] for r in conn.execute(
+        "SELECT client, SUM(owed_cents) AS owed FROM invoice_view GROUP BY client")}
+    last = {r["client"]: r["last"] for r in conn.execute(
+        "SELECT client, MAX(invoice_date) AS last FROM invoice_view GROUP BY client")}
+    taxdome = Matcher(list(years))
+    rows = []
+    for name in names:
+        m = taxdome.best(name)
+        client = m.found if m.same else None
+        billed = sorted(years.get(client, set())) if client else []
+        if year in billed:
+            continue
+        kind = "in_taxdome" if client else ("maybe" if m.maybe else "never")
+        rows.append({"name": name, "client": client, "maybe": m.found if kind == "maybe" else None,
+                     "kind": kind, "tax_years": billed, "last_invoice": (last.get(client) or "")[:10],
+                     "owed": owed.get(client, 0) if client else 0})
+    order = {"in_taxdome": 0, "maybe": 1, "never": 2}
+    rows.sort(key=lambda r: (order[r["kind"]], r["name"].lower()))
+    return {"year": year, "listed": len(names), "rows": rows}

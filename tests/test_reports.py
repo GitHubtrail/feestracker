@@ -158,3 +158,23 @@ def test_overpayments_are_explained(tmp_path):
     paid = {r["client"]: r["paid"] for r in reports.who_paid(conn)}
     assert paid["Shared Client"] == 50000  # counted once
     assert paid["Card Client"] == 103000
+
+
+def test_tax_year_written_on_invoice_wins():
+    from feestracker.reports import tax_years_of
+    assert tax_years_of("Tax year 2023 individual", "2025-03-01") == {"2023"}
+    assert tax_years_of("TY2024 return", "2025-03-01") == {"2024"}
+    assert tax_years_of("2022 tax return", "2025-03-01") == {"2022"}
+    assert tax_years_of("Bookkeeping", "2025-03-01") == {"2024"}
+
+
+def test_not_billed_for_a_tax_year(conn):
+    from feestracker import reports
+    db.save_client_list(conn, "2024", ["Acme Bakery LLC", "Maria Rivera", "Chen and Sons", "Nobody Here"])
+    nb = reports.not_billed(conn, "2024")
+    assert nb["listed"] == 4
+    by_name = {r["name"]: r for r in nb["rows"]}
+    assert "Chen and Sons" not in by_name  # billed for 2024
+    assert by_name["Acme Bakery LLC"]["kind"] == "in_taxdome"
+    assert by_name["Maria Rivera"]["kind"] == "in_taxdome"
+    assert by_name["Nobody Here"]["kind"] == "never"

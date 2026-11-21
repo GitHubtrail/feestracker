@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import db, reports, storage
+from .clientlists import ListError, names_from_text, read_names
 from .taxdome import ImportError_, format_cents, read_invoices
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -81,6 +82,7 @@ NAV = [
     ("/paid", "Who paid"),
     ("/clients", "All clients"),
     ("/import", "Import"),
+    ("/not-billed", "Not billed"),
     ("/bad-debts", "Bad debts"),
     ("/checks", "Data checks"),
     ("/data", "Your data & updates"),
@@ -603,6 +605,91 @@ def data_page(conn: sqlite3.Connection, db_path: Path, message: str = "") -> byt
     return page("Your data & updates", body, "/data")
 
 
+KIND_NOTE = {
+    "in_taxdome": "In TaxDome, but no invoice for this tax year",
+    "maybe": "Not sure of the TaxDome name",
+    "never": "No invoices in TaxDome at all",
+}
+
+
+def tax_year_options(today: date) -> list[str]:
+    return [str(y) for y in range(today.year, today.year - 9, -1)]
+
+
+def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: str = "") -> bytes:
+    lists = db.client_lists(conn)
+    years = [l["year"] for l in lists]
+    if year not in years:
+        year = years[0] if years else ""
+    tabs = " ".join(
+        f"<a href='/not-billed?year={quote(y)}' class='pill' style='{'font-weight:650' if y == year else ''}'>"
+        f"{escape(y)}</a>" for y in years)
+    table = ""
+    if year:
+        nb = reports.not_billed(conn, year)
+        counts = {k: sum(1 for r in nb["rows"] if r["kind"] == k) for k in KIND_NOTE}
+        rows = "".join(
+            f"<tr><td>{client_link(r['client']) if r['client'] else escape(r['name'])}"
+            + (f"<div class='small muted'>On your list as {escape(r['name'])}</div>"
+               if r["client"] and r["client"].lower() != r["name"].lower() else "")
+            + f"</td><td class=small>{KIND_NOTE[r['kind']]}"
+            + (f": maybe {client_link(r['maybe'])}" if r["maybe"] else "")
+            + f"</td><td class=muted>{escape(', '.join(r['tax_years'])) or '–'}</td>"
+            f"<td class=muted>{escape(r['last_invoice']) or '–'}</td>"
+            f"<td class='n {'owe' if r['owed'] else 'muted'}'>{money(r['owed'])}</td></tr>"
+            for r in nb["rows"])
+        table = f"""
+    <div class=cards>
+      <div class=card><div class=label>Not billed for {escape(year)}</div>
+        <div class="big owe">{len(nb['rows'])}</div>
+        <div class="small muted">of {count(nb['listed'], 'client')} on your {escape(year)} list</div></div>
+      <div class=card><div class=label>In TaxDome, no {escape(year)} invoice</div>
+        <div class=big>{counts['in_taxdome']}</div></div>
+      <div class=card><div class=label>Not sure of TaxDome name</div>
+        <div class="big warn">{counts['maybe']}</div></div>
+      <div class=card><div class=label>No invoices in TaxDome</div>
+        <div class="big muted">{counts['never']}</div></div>
+    </div>
+    <p class="small muted">An invoice counts for the tax year written on it (“Tax year {escape(year)}”,
+      “TY {escape(year)}”, “{escape(year)} tax return”). If none is written, it counts for the year before
+      the invoice date, because {escape(year)} returns are usually billed in {int(year) + 1}.
+      <a href="/not-billed.csv?year={quote(year)}">Download this list (CSV)</a></p>
+    <div class=wrap><table><thead><tr><th>Client</th><th>Why it's here</th><th>Tax years billed</th>
+      <th>Last invoice</th><th class=n>Owes now</th></tr></thead>
+      <tbody>{rows or '<tr><td colspan=5 class=muted>Everyone on this list was billed.</td></tr>'}</tbody>
+    </table></div>"""
+    options = "".join(f"<option{' selected' if y == str(today.year - 1) else ''}>{y}</option>"
+                      for y in tax_year_options(today))
+    upload = f"""<h2>Add or replace a client list</h2>
+    <form method=post action="/not-billed" enctype="multipart/form-data" class="payform">
+      <p><label>Tax year <select name=year>{options}</select></label></p>
+      <p><label>Client list from your tax software (Excel .xlsx or CSV): <input type=file name=file
+        accept=".csv,.xlsx,.xlsm,.txt"></label></p>
+      <p><label>or paste names, one per line:<br><textarea name=names rows=3></textarea></label></p>
+      <p><button>Save list</button> <span class="small muted">Only client names are kept. SSNs, EINs,
+        emails and addresses in the file are never saved.</span></p>
+      <p class="small muted">Client lists are kept on their own: saving one never changes your clients,
+        invoices, payments or bad debts, and saving a year again only replaces that year's list.</p>
+    </form>"""
+    body = f"""<h1>Not billed{' for tax year ' + escape(year) if year else ''}</h1>
+    {message}
+    <p class=muted>Clients on your client list for a tax year who have no TaxDome invoice for that year.</p>
+    {('<p>Tax year: ' + tabs + '</p>') if years else '<div class=note>Add your client list for a tax year below to see who wasn’t billed.</div>'}
+    {table}
+    {upload}"""
+    return page("Not billed", body, "/not-billed")
+
+
+def not_billed_csv(conn: sqlite3.Connection, year: str) -> bytes:
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["Client", "Name in TaxDome", "Why it's here", "Tax years billed", "Last invoice", "Owes now"])
+    for r in reports.not_billed(conn, year)["rows"]:
+        w.writerow([r["name"], r["client"] or r["maybe"] or "", KIND_NOTE[r["kind"]],
+                    ", ".join(r["tax_years"]), r["last_invoice"], f"{r['owed'] / 100:.2f}"])
+    return out.getvalue().encode("utf-8-sig")
+
+
 def import_page(message: str = "") -> bytes:
     body = f"""<h1>Import from TaxDome</h1>
     {message}
@@ -655,17 +742,24 @@ def checks(conn: sqlite3.Connection) -> bytes:
 # ---------------------------------------------------------------- server
 
 
-def read_upload(content_type: str, body: bytes) -> bytes | None:
-    """Return the bytes of the 'file' field from a multipart form body."""
+def read_form(content_type: str, body: bytes) -> dict[str, tuple[str, bytes]]:
+    """The fields of a multipart form body, as {name: (filename, bytes)}."""
     msg = email.parser.BytesParser(policy=email.policy.HTTP).parsebytes(
         b"Content-Type: " + content_type.encode("latin-1") + b"\r\n\r\n" + body
     )
     if not msg.is_multipart():
-        return None
+        return {}
+    fields = {}
     for part in msg.iter_parts():
-        if part.get_param("name", header="content-disposition") == "file":
-            return part.get_payload(decode=True)
-    return None
+        name = part.get_param("name", header="content-disposition")
+        if name:
+            fields[name] = (part.get_filename() or "", part.get_payload(decode=True) or b"")
+    return fields
+
+
+def read_upload(content_type: str, body: bytes) -> bytes | None:
+    """Return the bytes of the 'file' field from a multipart form body."""
+    return read_form(content_type, body).get("file", ("", b""))[1] or None
 
 
 def parse_amount(text: str) -> int | None:
@@ -725,6 +819,12 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                     self._send(client_page(conn, today, q.get("name", "")))
                 elif url.path == "/import":
                     self._send(import_page())
+                elif url.path == "/not-billed":
+                    self._send(not_billed_page(conn, today, q.get("year", "")))
+                elif url.path == "/not-billed.csv":
+                    self._send(not_billed_csv(conn, q.get("year", "")), "text/csv; charset=utf-8",
+                               extra={"Content-Disposition":
+                                      f'attachment; filename="not-billed-{quote(q.get("year", ""))}.csv"'})
                 elif url.path == "/data":
                     self._send(data_page(conn, db_path))
                 elif url.path == "/checks":
@@ -750,6 +850,9 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                 return
             if path == "/bad-debt":
                 self._bad_debt()
+                return
+            if path == "/not-billed":
+                self._save_list()
                 return
             if path in ("/data/bring-back", "/update"):
                 self._data_action(path)
@@ -803,6 +906,39 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
             if not back.startswith("/") or back.startswith("//"):
                 back = "/"
             self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
+
+        def _save_list(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            today = today_fn()
+            conn = db.connect(db_path)
+            try:
+                def reply(text: str, ok: bool, year: str = "", status=HTTPStatus.OK):
+                    css = "ok" if ok else "owe"
+                    self._send(not_billed_page(conn, today, year, f"<div class='note {css}'>{text}</div>"),
+                               status=status)
+
+                if length > MAX_UPLOAD_BYTES:
+                    return reply("That file is too big.", False, status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                form = read_form(self.headers.get("Content-Type", ""), self.rfile.read(length))
+                year = form.get("year", ("", b""))[1].decode("utf-8", "replace").strip()
+                if year not in tax_year_options(today):
+                    return reply("Please choose a tax year.", False, status=HTTPStatus.BAD_REQUEST)
+                filename, data = form.get("file", ("", b""))
+                pasted = form.get("names", ("", b""))[1].decode("utf-8", "replace")
+                try:
+                    if data:
+                        names, source = read_names(data, filename), filename
+                    elif pasted.strip():
+                        names, source = names_from_text(pasted), "pasted names"
+                    else:
+                        return reply("Please choose a file or paste some names.", False,
+                                     status=HTTPStatus.BAD_REQUEST)
+                except ListError as exc:
+                    return reply(escape(str(exc)), False, status=HTTPStatus.BAD_REQUEST)
+                db.save_client_list(conn, year, names, source)
+                reply(f"Saved your {escape(year)} list with {count(len(names), 'client')}.", True, year)
+            finally:
+                conn.close()
 
         def _data_action(self, path: str):
             length = min(int(self.headers.get("Content-Length") or 0), 10_000)
