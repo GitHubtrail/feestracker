@@ -16,6 +16,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import urllib.error
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -188,6 +189,13 @@ def update_app(app_dir: Path = APP_DIR, url: str = UPDATE_URL, fetch=None) -> No
         raise UpdateError("This copy is a git checkout. Use git pull instead.")
     try:
         data = fetch(url) if fetch else urllib.request.urlopen(url, timeout=60).read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise UpdateError(
+                "The app's GitHub page is private, so the app can't download updates by itself. "
+                "Sign in to GitHub, open the Fees Tracker page, choose Code → Download ZIP, unzip it "
+                "and start Fees Tracker from the new folder. Your data stays where it is.") from exc
+        raise UpdateError(f"Could not download the update (GitHub said {exc.code}).") from exc
     except OSError as exc:
         raise UpdateError("Could not download the update. Check your internet connection.") from exc
     try:
