@@ -64,9 +64,10 @@ form.act button { background:transparent; color:var(--accent); border:1px solid 
 .pill.bad { color:var(--muted); background:var(--bg) }
 fieldset { border:1px solid var(--line); border-radius:10px; background:var(--card); padding:12px 16px; margin:0 0 16px }
 fieldset label { margin-right:14px; white-space:nowrap }
-details.act summary { cursor:pointer; color:var(--accent); margin-top:6px }
-details.act input { font:inherit; padding:4px 6px; border:1px solid var(--line); border-radius:6px;
-                    background:var(--bg); color:var(--ink) }
+.payform input:not([type=checkbox]) { font:inherit; padding:4px 6px; border:1px solid var(--line);
+                    border-radius:6px; background:var(--bg); color:var(--ink) }
+.payform input[type=checkbox] { width:18px; height:18px }
+.payform .inline { display:flex; flex-wrap:wrap; gap:10px 16px; align-items:center }
 .stack > * { margin:0 0 10px }
 """
 
@@ -352,6 +353,7 @@ def client_page(conn: sqlite3.Connection, today: date, name: str) -> bytes:
       <div class=card><div class=label>Billed</div><div class=big>{money(billed)}</div>
         <div class="small muted">{len(invoices)} invoices</div></div>
     </div>
+    {payments_form(open_invs, '/client?name=' + quote(name), today) if open_invs else ''}
     {reminder}
     <h2>Invoices</h2>
     <div class=wrap><table><thead><tr><th>Invoice</th><th>Date</th><th>Status</th><th>Services</th>
@@ -362,13 +364,9 @@ def client_page(conn: sqlite3.Connection, today: date, name: str) -> bytes:
 
 def bad_debt_button(number: str, mark: bool, back: str) -> str:
     """A small form button that marks or unmarks one invoice as bad debt."""
-    if mark:
-        label, confirm = "Mark as bad debt", "Write this invoice off as bad debt? You can undo this later."
-    else:
-        label, confirm = "Undo bad debt", ""
-    onsubmit = f' onsubmit="return confirm({escape(repr(confirm))})"' if confirm else ""
+    label = "Mark as bad debt" if mark else "Undo bad debt"
     return (
-        f'<form class=act method=post action="/bad-debt"{onsubmit}>'
+        f'<form class=act method=post action="/bad-debt">'
         f'<input type=hidden name=number value="{escape(number)}">'
         f'<input type=hidden name=action value="{"mark" if mark else "unmark"}">'
         f'<input type=hidden name=back value="{escape(back)}">'
@@ -386,8 +384,7 @@ def paid_cell(conn: sqlite3.Connection, inv: dict, client: str) -> str:
         note = f" · {escape(p['note'])}" if p["note"] else ""
         out += (
             f"<div class='small muted'>{money(p['amount_cents'])} on {escape(p['paid_on'])}{note}"
-            f"<form class=act method=post action='/payment' "
-            f"onsubmit=\"return confirm('Delete this payment?')\">"
+            f"<form class=act method=post action='/payment'>"
             f"<input type=hidden name=action value=delete>"
             f"<input type=hidden name=id value='{p['id']}'>"
             f"<input type=hidden name=back value='{escape(back)}'><button>Delete</button></form></div>"
@@ -398,20 +395,41 @@ def paid_cell(conn: sqlite3.Connection, inv: dict, client: str) -> str:
     return out
 
 
-def payment_form(number: str, back: str, today: date) -> str:
-    """A small form to record money received for one invoice, such as a part payment."""
-    return (
-        "<details class=act><summary class=small>Record payment</summary>"
-        "<form method=post action='/payment' class=stack style='margin-top:6px;text-align:left'>"
-        "<input type=hidden name=action value=add>"
-        f"<input type=hidden name=number value='{escape(number)}'>"
-        f"<input type=hidden name=back value='{escape(back)}'>"
-        "<div><label class=small>Amount received<br><input name=amount inputmode=decimal required "
-        "placeholder='500.00' size=10></label></div>"
-        f"<div><label class=small>Date<br><input type=date name=paid_on value='{today.isoformat()}' required></label></div>"
-        "<div><label class=small>Note (optional)<br><input name=note placeholder='Zelle' size=14></label></div>"
-        "<div><button>Save payment</button></div></form></details>"
+def payments_form(open_invoices: list[dict], back: str, today: date) -> str:
+    """Tick the invoices a client paid. Ticking fills in what is still owed, which you
+    can change for a part payment. One date and note go with all of them."""
+    rows = "".join(
+        f"<tr><td><input type=checkbox name=pay value='{escape(i['number'])}' "
+        f"id='pay-{escape(i['number'])}' data-owed='{i['owed_cents'] / 100:.2f}' onchange='fillAmount(this)'></td>"
+        f"<td><label for='pay-{escape(i['number'])}'>{escape(i['number'])}</label></td>"
+        f"<td>{escape(i['invoice_date'][:10])}</td><td class='n owe'>{money(i['owed_cents'])}</td>"
+        f"<td class=n><input name='amount_{escape(i['number'])}' inputmode=decimal size=10 "
+        f"placeholder='0.00' oninput='tickIfFilled(this)'></td></tr>"
+        for i in open_invoices
     )
+    return f"""<h2>Record a payment</h2>
+    <p class="small muted">Tick the invoices the client paid. The amount still owed is filled in for you;
+      change it if they paid only part. The rest stays owed.</p>
+    <form method=post action="/payment" class=payform>
+      <input type=hidden name=action value=add><input type=hidden name=back value="{escape(back)}">
+      <div class=wrap><table><thead><tr><th></th><th>Invoice</th><th>Date</th><th class=n>Owes</th>
+        <th class=n>Amount received</th></tr></thead><tbody>{rows}</tbody></table></div>
+      <div class=inline style="margin-top:10px">
+        <label>Date paid <input type=date name=paid_on value="{today.isoformat()}" required></label>
+        <label>Note <input name=note placeholder="Zelle, cheque…" size=16></label>
+        <button>Save payment</button></div>
+    </form>
+    <script>
+    function fillAmount(box) {{
+      const amount = box.form.elements['amount_' + box.value];
+      amount.value = box.checked ? box.dataset.owed : '';
+      if (box.checked) amount.select();
+    }}
+    function tickIfFilled(input) {{
+      const box = document.getElementById('pay-' + input.name.slice(7));
+      box.checked = input.value.trim() !== '';
+    }}
+    </script>"""
 
 
 def owes_cell(inv: dict, client: str, today: date) -> str:
@@ -424,7 +442,6 @@ def owes_cell(inv: dict, client: str, today: date) -> str:
         )
     if inv["owed_cents"] > 0:
         return (f"<span class=owe>{money(inv['owed_cents'])}</span>"
-                + payment_form(inv["number"], back, today)
                 + bad_debt_button(inv["number"], True, back))
     return f"<span class=muted>{money(0)}</span>"
 
@@ -772,33 +789,44 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                 conn.close()
 
         def _payment(self):
-            length = min(int(self.headers.get("Content-Length") or 0), 10_000)
-            form = {k: v[0] for k, v in parse_qs(self.rfile.read(length).decode("utf-8")).items()}
+            length = min(int(self.headers.get("Content-Length") or 0), 100_000)
+            fields = parse_qs(self.rfile.read(length).decode("utf-8"))
+            form = {k: v[0] for k, v in fields.items()}
             back = form.get("back", "/")
             if not back.startswith("/") or back.startswith("//"):
                 back = "/"
+
+            def not_saved(text: str, status=HTTPStatus.BAD_REQUEST):
+                self._send(page("Payment not saved", f"<h1>Payment not saved</h1><p>{text} "
+                                f"<a href='{escape(back)}'>Go back</a></p>"), status=status)
+
             conn = db.connect(db_path)
             try:
                 if form.get("action") == "delete":
                     if form.get("id", "").isdigit():
                         db.delete_payment(conn, int(form["id"]))
                 else:
-                    cents = parse_amount(form.get("amount", ""))
                     paid_on = form.get("paid_on", "")
                     try:
                         date.fromisoformat(paid_on)
                     except ValueError:
-                        paid_on = ""
-                    if cents is None or cents <= 0 or not paid_on:
-                        self._send(page("Payment not saved",
-                                        "<h1>Payment not saved</h1><p>Please enter an amount such as "
-                                        f"500 or 1,250.50 and a date. <a href='{escape(back)}'>Go back</a></p>"),
-                                   status=HTTPStatus.BAD_REQUEST)
-                        return
-                    if not db.add_payment(conn, form.get("number", ""), cents, paid_on, form.get("note", "")):
-                        self._send(page("Not found", "<h1>Invoice not found</h1>"),
-                                   status=HTTPStatus.NOT_FOUND)
-                        return
+                        return not_saved("Please choose the date it was paid.")
+                    # Ticked invoices, each with its own amount; or one invoice and amount.
+                    numbers = fields.get("pay") or ([form["number"]] if form.get("number") else [])
+                    if not numbers:
+                        return not_saved("Please tick at least one invoice.")
+                    to_save = []
+                    for number in dict.fromkeys(numbers):
+                        raw = form.get(f"amount_{number}", form.get("amount", "") if "pay" not in fields else "")
+                        cents = parse_amount(raw)
+                        if not cents:
+                            return not_saved(f"Please enter an amount such as 500 or 1,250.50 for invoice "
+                                             f"{escape(number)}. Nothing was saved.")
+                        if not conn.execute("SELECT 1 FROM invoices WHERE number = ?", (number,)).fetchone():
+                            return not_saved("Invoice not found. Nothing was saved.", HTTPStatus.NOT_FOUND)
+                        to_save.append((number, cents))
+                    for number, cents in to_save:
+                        db.add_payment(conn, number, cents, paid_on, form.get("note", ""))
             finally:
                 conn.close()
             self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})

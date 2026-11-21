@@ -157,7 +157,8 @@ def test_parse_amount():
 def test_record_part_payment(server):
     upload(server, FIXTURE.read_bytes())
     back = "/client?name=Rivera%20Maria"
-    assert "Record payment" in get(server + back)
+    page_html = get(server + back)
+    assert "Record a payment" in page_html and "data-owed='600.00'" in page_html
 
     status, headers = post_form(server, "/payment", {
         "action": "add", "number": "1003", "amount": "$200.00", "paid_on": "2026-11-15",
@@ -189,3 +190,41 @@ def test_record_part_payment(server):
     first_id = re.search(r"name=id value='(\d+)'", client).group(1)
     post_form(server, "/payment", {"action": "delete", "id": first_id, "back": back})
     assert "Invoice 1003 dated 2022-05-10: $200.00" in get(server + back)  # only the $400 is left
+
+
+def post_multi(base, path, pairs):
+    from urllib.parse import urlencode
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+
+    req = urllib.request.Request(base + path, data=urlencode(pairs).encode(), method="POST",
+                                 headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.build_opener(NoRedirect).open(req) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+def test_tick_several_invoices(server):
+    upload(server, FIXTURE.read_bytes())
+    back = "/client?name=Rivera%20Maria"
+    # Invoice 1003 paid in full, 1004 paid in part; one date and note for both.
+    status = post_multi(server, "/payment", [
+        ("action", "add"), ("back", back), ("paid_on", "2026-11-20"), ("note", "Cheque"),
+        ("pay", "1003"), ("amount_1003", "600.00"), ("pay", "1004"), ("amount_1004", "100"),
+        ("amount_1005", "999")])  # not ticked, so ignored
+    assert status == 303
+    client = get(server + back)
+    assert "Total due: $50.00" in client
+    assert client.count("on 2026-11-20 · Cheque") == 2
+
+    # A ticked invoice with no amount saves nothing at all.
+    status = post_multi(server, "/payment", [
+        ("action", "add"), ("back", back), ("paid_on", "2026-11-20"),
+        ("pay", "1004"), ("amount_1004", "10"), ("pay", "1003"), ("amount_1003", "")])
+    assert status == 400
+    assert "Total due: $50.00" in get(server + back)
+    assert post_multi(server, "/payment", [("action", "add"), ("paid_on", "2026-11-20")]) == 400
