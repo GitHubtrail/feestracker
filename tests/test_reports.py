@@ -129,3 +129,32 @@ def test_totals_add_up_with_bad_debts_and_part_payments(conn):
     assert s.billed_cents == s.collected_cents + s.outstanding_cents + s.written_off_cents
     for r in reports.by_year(conn):
         assert r["billed"] == r["collected"] + r["outstanding"] + r["written_off"]
+
+
+def test_overpayments_are_explained(tmp_path):
+    from decimal import Decimal
+
+    from feestracker.taxdome import Invoice, LineItem, Payment
+
+    def inv(number, client, total, paid):
+        return Invoice(number=number, status="paid", client=client, assigned_to="", description="",
+                       created_at="", updated_at="", invoice_date="2025-01-01", paid_at="2025-01-02",
+                       payment_methods="Credit card", timezone="",
+                       line_items=[LineItem("service", 1, "Tax return", total, Decimal(1), "")],
+                       payments=[Payment(position=1, creator="", amount_cents=paid, status="succeeded")])
+
+    conn = db.connect(tmp_path / "o.db")
+    db.save_invoices(conn, [
+        inv("A1", "Card Client", 100000, 103000),       # 3% card fee
+        inv("B1", "Shared Client", 30000, 50000),       # one $500 payment for two invoices,
+        inv("B2", "Shared Client", 20000, 50000),       # listed on both
+        inv("C1", "Odd Client", 10000, 60000),          # something else
+    ], "test")
+    found = reports.overpayments(conn)
+    assert {n: o["kind"] for n, o in found.items()} == {
+        "A1": "card_fee", "B1": "shared", "B2": "shared", "C1": "other"}
+    totals = reports.overpayment_totals(conn)
+    assert totals["card_fee"]["cents"] == 3000 and totals["shared"]["cents"] == 50000
+    paid = {r["client"]: r["paid"] for r in reports.who_paid(conn)}
+    assert paid["Shared Client"] == 50000  # counted once
+    assert paid["Card Client"] == 103000

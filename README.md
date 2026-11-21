@@ -82,9 +82,13 @@ Do this again whenever you want fresh numbers.
   pays one later, only what is left unpaid counts as written off.
 - On the Summary, **billed = collected + owed + bad debt**, overall and for each year.
   Collected there counts what was paid toward each invoice, up to its amount. Money paid
-  above an invoice's amount (for example one payment that covered several invoices) is
-  shown on its own line as "paid above invoice", and those invoices are listed on Data checks.
-  Who paid and each client's page still show everything the client actually paid.
+  above an invoice's amount is shown separately, sorted into:
+  - **Card processing fees**: the client paid a card fee on top (about 3%);
+  - **Same payment shown on several invoices**: one payment covered several invoices and
+    TaxDome lists it in full on each. It is money received once. Who paid and each client's
+    Paid box count it once;
+  - **Other**: worth a look in TaxDome.
+  Data checks labels each of these invoices.
 - **Age** is counted from the invoice date.
 - The **year** on the summary and on Who owes is the invoice's year. On Who paid it is the
   year the invoice was paid.

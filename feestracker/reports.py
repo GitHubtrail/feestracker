@@ -88,7 +88,6 @@ def by_year(conn: sqlite3.Connection) -> list[dict]:
                   COUNT(*) AS invoices,
                   SUM(total_cents) AS billed,
                   SUM(collected_cents) AS collected,
-                  SUM(overpaid_cents) AS overpaid,
                   SUM(owed_cents) AS outstanding,
                   SUM(owed_cents > 0) AS open_invoices,
                   COUNT(DISTINCT CASE WHEN owed_cents > 0 THEN client END) AS clients_owing,
@@ -125,12 +124,79 @@ def age_totals(owing: list[dict]) -> dict[str, int]:
     return {key: sum(c[key] for c in owing) for key, *_ in AGE_BUCKETS}
 
 
+# What the money paid above an invoice's amount is.
+OVERPAYMENT_KINDS = (
+    ("card_fee", "Card processing fees",
+     "The client paid a card fee on top of the invoice (about 3%)."),
+    ("shared", "Same payment shown on several invoices",
+     "One payment covered several invoices, and TaxDome lists it in full on each of them. "
+     "It is money received once, not extra money."),
+    ("other", "Other",
+     "A payment on an invoice that was already paid or had nothing to pay. Worth a look in TaxDome."),
+)
+CARD_FEE_RATE = 0.036  # fees seen are 3%; allow a little more, plus $1 for rounding
+
+
+def overpayments(conn: sqlite3.Connection) -> dict[str, dict]:
+    """For each invoice paid above its amount: what the extra is and how much.
+
+    TaxDome lists a payment that covered several invoices in full on each of them,
+    so the same amount shows up on more than one invoice of the same client.
+    """
+    invoices = {r["number"]: dict(r) for r in conn.execute(
+        "SELECT number, client, total_cents, collected_cents, overpaid_cents FROM invoice_view")}
+    payments: dict[str, list[int]] = {}
+    for p in conn.execute("SELECT invoice_number, amount_cents FROM payments WHERE status = 'succeeded'"):
+        payments.setdefault(p["invoice_number"], []).append(p["amount_cents"])
+    listed_on: dict[tuple, set] = {}
+    for number, amounts in payments.items():
+        for amount in amounts:
+            listed_on.setdefault((invoices[number]["client"], amount), set()).add(number)
+    out = {}
+    for number, inv in invoices.items():
+        extra = inv["overpaid_cents"]
+        if extra <= 0:
+            continue
+        shared = [a for a in payments.get(number, []) if len(listed_on[(inv["client"], a)]) > 1]
+        # A payment that is exactly the total of all the invoices it is listed on.
+        covers_all = any(
+            abs(a - sum(invoices[n]["total_cents"] for n in listed_on[(inv["client"], a)])) <= max(100, a // 100)
+            for a in shared)
+        if covers_all:
+            kind = "shared"
+        elif extra <= round(inv["collected_cents"] * CARD_FEE_RATE) + 100:
+            kind = "card_fee"
+        elif shared:
+            kind = "shared"
+        else:
+            kind = "other"
+        out[number] = {"kind": kind, "cents": extra}
+    return out
+
+
+def overpayment_totals(conn: sqlite3.Connection, found: dict | None = None) -> dict[str, dict]:
+    found = overpayments(conn) if found is None else found
+    totals = {k: {"cents": 0, "invoices": 0} for k, *_ in OVERPAYMENT_KINDS}
+    for o in found.values():
+        totals[o["kind"]]["cents"] += o["cents"]
+        totals[o["kind"]]["invoices"] += 1
+    return totals
+
+
+def counted_twice(conn: sqlite3.Connection) -> dict[str, int]:
+    """Per invoice, money shown as paid that is really a payment counted on another invoice."""
+    return {n: o["cents"] for n, o in overpayments(conn).items() if o["kind"] == "shared"}
+
+
 def who_paid(conn: sqlite3.Connection, year: str | None = None) -> list[dict]:
-    """Clients who have paid, most collected first. Year is the year it was paid."""
-    sql = """SELECT client,
-                    SUM(paid_cents) AS paid,
-                    COUNT(*) AS invoices,
-                    MAX(paid_at) AS last_paid
+    """Clients who have paid, most collected first. Year is the year it was paid.
+
+    A payment that TaxDome lists on several invoices is counted once.
+    """
+    twice = counted_twice(conn)
+    sql = """SELECT client, number,
+                    paid_cents AS paid,
+                    paid_at
              FROM invoice_view
              WHERE paid_cents > 0"""
     params: list = []
@@ -138,8 +204,13 @@ def who_paid(conn: sqlite3.Connection, year: str | None = None) -> list[dict]:
         # Paid invoices have a paid date; part-paid ones don't, so use the invoice date.
         sql += " AND substr(COALESCE(NULLIF(paid_at, ''), invoice_date), 1, 4) = ?"
         params.append(year)
-    sql += " GROUP BY client ORDER BY paid DESC, client"
-    return [dict(r) for r in conn.execute(sql, params)]
+    clients: dict[str, dict] = {}
+    for r in conn.execute(sql, params):
+        c = clients.setdefault(r["client"], {"client": r["client"], "paid": 0, "invoices": 0, "last_paid": ""})
+        c["paid"] += r["paid"] - twice.get(r["number"], 0)
+        c["invoices"] += 1
+        c["last_paid"] = max(c["last_paid"], r["paid_at"] or "")
+    return sorted(clients.values(), key=lambda c: (-c["paid"], c["client"]))
 
 
 def years(conn: sqlite3.Connection) -> list[str]:

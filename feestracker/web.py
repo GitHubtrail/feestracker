@@ -141,12 +141,27 @@ def home(conn: sqlite3.Connection, today: date) -> bytes:
         return page("Summary", "<h1>Summary</h1>" + empty_state(), "/")
     owing = reports.who_owes(conn, today)
     ages = reports.age_totals(owing)
+    extra = reports.overpayments(conn)
+    extra_totals = reports.overpayment_totals(conn, extra)
+    card_fees_by_year: dict[str, int] = {}
+    for number, o in extra.items():
+        if o["kind"] == "card_fee":
+            y = conn.execute("SELECT substr(invoice_date, 1, 4) FROM invoices WHERE number = ?",
+                             (number,)).fetchone()[0] or "No date"
+            card_fees_by_year[y] = card_fees_by_year.get(y, 0) + o["cents"]
     overpaid = ""
-    if s.overpaid_cents:
+    if extra:
+        lines = "".join(
+            f"<tr><td>{label}<div class='small muted'>{explain}</div></td>"
+            f"<td class=n>{money(extra_totals[key]['cents'])}</td>"
+            f"<td class='n muted'>{count(extra_totals[key]['invoices'], 'invoice')}</td></tr>"
+            for key, label, explain in reports.OVERPAYMENT_KINDS if extra_totals[key]["invoices"]
+        )
         overpaid = (
-            f"<p class='small muted'>Not included above: {money(s.overpaid_cents)} paid above the invoice "
-            f"amount on {count(s.overpaid_invoices, 'invoice')}, for example one payment that covered "
-            "several invoices. See <a href='/checks'>Data checks</a>.</p>"
+            "<h2>Paid above the invoice amount</h2>"
+            "<p class='small muted'>Not part of the boxes above. Each invoice is listed on "
+            "<a href='/checks'>Data checks</a>.</p>"
+            f"<div class=wrap><table><tbody>{lines}</tbody></table></div>"
         )
     cards = f"""
     <div class=cards>
@@ -173,7 +188,7 @@ def home(conn: sqlite3.Connection, today: date) -> bytes:
             <td class=n>{money(y['billed'])}</td><td class="n ok">{money(y['collected'])}</td>
             <td class="n owe">{money(y['outstanding'])}</td>
             <td class="n muted">{money(y['written_off'])}</td>
-            <td class="n muted">{money(y['overpaid']) if y['overpaid'] else '–'}</td>
+            <td class="n muted">{money(card_fees_by_year.get(y['year'], 0)) if card_fees_by_year.get(y['year']) else '–'}</td>
             <td class=n><a href="/owes?year={quote(y['year'])}">{y['clients_owing']} clients</a></td></tr>"""
         for y in reports.by_year(conn)
     )
@@ -188,10 +203,10 @@ def home(conn: sqlite3.Connection, today: date) -> bytes:
     <h2>Year by year</h2>
     <div class=wrap><table><thead><tr><th>Invoice year</th><th class=n>Invoices</th>
       <th class=n>Billed</th><th class=n>Collected</th><th class=n>Still owed</th>
-      <th class=n>Bad debt</th><th class=n>Paid above invoice</th><th class=n>Clients owing</th></tr></thead>
+      <th class=n>Bad debt</th><th class=n>Card fees</th><th class=n>Clients owing</th></tr></thead>
       <tbody>{year_rows}</tbody></table></div>
     <p class="small muted">In each year, billed = collected + still owed + bad debt.
-      “Paid above invoice” is extra money received on top of that.</p>
+      “Card fees” is what clients paid on top for paying by card.</p>
     <h2>How old is the money owed?</h2>
     <div class=wrap><table><tbody>{age_rows}</tbody></table></div>
     <h2>Biggest balances</h2>
@@ -312,7 +327,11 @@ def client_page(conn: sqlite3.Connection, today: date, name: str) -> bytes:
     if not invoices:
         return page("Client", "<h1>Client not found</h1><p><a href='/clients'>All clients</a></p>")
     billed = sum(i["total_cents"] for i in invoices)
-    paid_ = sum(i["paid_cents"] for i in invoices)
+    extra = reports.overpayments(conn)
+    for i in invoices:
+        i["extra"] = extra.get(i["number"])
+    paid_ = sum(i["paid_cents"] - (i["extra"]["cents"] if i["extra"] and i["extra"]["kind"] == "shared" else 0)
+                for i in invoices)
     owed = sum(i["owed_cents"] for i in invoices)
     written_off = sum(i["written_off_cents"] for i in invoices)
     open_invs = [i for i in invoices if i["owed_cents"] > 0]
@@ -377,6 +396,10 @@ def bad_debt_button(number: str, mark: bool, back: str) -> str:
 def paid_cell(conn: sqlite3.Connection, inv: dict, client: str) -> str:
     """What was paid, listing any payments entered here with a Delete button each."""
     out = money(inv["paid_cents"])
+    extra = inv.get("extra")
+    if extra:
+        label = {k: lbl for k, lbl, _ in reports.OVERPAYMENT_KINDS}[extra["kind"]]
+        out += f"<div class='small muted'>incl. {money(extra['cents'])}: {label.lower()}</div>"
     if not inv["manual_paid_cents"]:
         return out
     back = "/client?name=" + quote(client)
@@ -594,16 +617,35 @@ def import_page(message: str = "") -> bytes:
 
 def checks(conn: sqlite3.Connection) -> bytes:
     found = reports.problems(conn)
+    extra = reports.overpayments(conn)
+    labels = {k: label for k, label, _ in reports.OVERPAYMENT_KINDS}
+
+    def what(p: dict) -> str:
+        lines = [escape(x) for x in p["problems"].splitlines()]
+        o = extra.get(p["number"])
+        if o:
+            css = "muted" if o["kind"] != "other" else "warn"
+            lines.append(f"<span class={css}><b>{labels[o['kind']]}</b>: {money(o['cents'])} "
+                         "above the invoice amount</span>")
+        return "<br>".join(lines)
+
     rows = "".join(
         f"<tr><td>{escape(p['number'])}</td><td>{client_link(p['client'])}</td>"
         f"<td>{escape(p['status'])}</td><td>{escape(p['invoice_date'][:10])}</td>"
-        f"<td class='small warn'>{'<br>'.join(escape(x) for x in p['problems'].splitlines())}</td></tr>"
+        f"<td class='small warn'>{what(p)}</td></tr>"
         for p in found
+    )
+    totals = reports.overpayment_totals(conn, extra)
+    summary = "".join(
+        f"<tr><td>{label}<div class='small muted'>{explain}</div></td>"
+        f"<td class=n>{money(totals[k]['cents'])}</td><td class='n muted'>{count(totals[k]['invoices'], 'invoice')}</td></tr>"
+        for k, label, explain in reports.OVERPAYMENT_KINDS if totals[k]["invoices"]
     )
     body = f"""<h1>Data checks</h1>
     <p class="muted">Invoices where the TaxDome export doesn't add up. These don't stop anything
       from working, but they may be worth fixing in TaxDome. Paid invoices always count as
       owing nothing.</p>
+    {'<h2>Paid above the invoice amount</h2><div class=wrap><table><tbody>' + summary + '</tbody></table></div><h2>Invoices</h2>' if summary else ''}
     <div class=wrap><table><thead><tr><th>Invoice</th><th>Client</th><th>Status</th><th>Date</th>
       <th>What looks off</th></tr></thead>
       <tbody>{rows or '<tr><td colspan=5 class=muted>Everything adds up.</td></tr>'}</tbody></table></div>"""

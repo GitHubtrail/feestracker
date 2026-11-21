@@ -57,8 +57,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Invoices:  {s.invoices}")
         print(f"Billed:    {format_cents(s.billed_cents)}")
         print(f"Collected: {format_cents(s.collected_cents)}")
-        if s.overpaid_cents:
-            print(f"           (plus {format_cents(s.overpaid_cents)} paid above invoice amounts)")
+        extra = reports.overpayment_totals(conn)
+        if any(t["invoices"] for t in extra.values()):
+            print("Paid above invoice amounts (not in the totals):")
+            for key, label, _ in reports.OVERPAYMENT_KINDS:
+                t = extra[key]
+                if t["invoices"]:
+                    print(f"  {label}: {format_cents(t['cents'])} ({t['invoices']} invoices)")
         print(f"Owed now:  {format_cents(s.outstanding_cents)}  "
               f"({s.open_invoices} invoices, {s.clients_owing} clients)")
         print("\nYear   Billed          Collected       Still owed")
