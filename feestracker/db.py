@@ -75,6 +75,13 @@ CREATE TABLE IF NOT EXISTS manual_payments (
 );
 CREATE INDEX IF NOT EXISTS manual_payments_invoice ON manual_payments(invoice_number);
 
+-- Clients you removed. Their invoices are left out of every page and total, and
+-- stay left out after a new TaxDome import, until you put them back.
+CREATE TABLE IF NOT EXISTS removed_clients (
+    name       TEXT PRIMARY KEY,
+    removed_at TEXT NOT NULL
+);
+
 -- What the reports read: each invoice with the payments you entered added to
 -- what TaxDome says was paid, and its unpaid balance split into money still
 -- owed and money written off as bad debt. Recreated on every start so older
@@ -97,7 +104,8 @@ WITH m AS (SELECT invoice_number, SUM(amount_cents) AS cents, MAX(paid_on) AS la
               b.invoice_number IS NOT NULL AS bad_debt
        FROM invoices i
        LEFT JOIN m ON m.invoice_number = i.number
-       LEFT JOIN bad_debts b ON b.invoice_number = i.number)
+       LEFT JOIN bad_debts b ON b.invoice_number = i.number
+       WHERE i.client NOT IN (SELECT name FROM removed_clients))
 SELECT v.*,
        -- What was paid toward the invoice itself, so billed always equals
        -- collected + owed + written off. Anything paid above the invoice amount
@@ -107,6 +115,20 @@ SELECT v.*,
        CASE WHEN bad_debt THEN 0 ELSE balance_cents END AS owed_cents,
        CASE WHEN bad_debt THEN balance_cents ELSE 0 END AS written_off_cents
 FROM v;
+
+-- Your own client lists, one per tax year, to see who wasn't billed. Kept apart
+-- from TaxDome data so importing invoices never touches them.
+CREATE TABLE IF NOT EXISTS client_lists (
+    year        TEXT PRIMARY KEY,
+    source      TEXT NOT NULL DEFAULT '',
+    uploaded_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS client_list_names (
+    year     TEXT NOT NULL REFERENCES client_lists(year) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    name     TEXT NOT NULL,
+    PRIMARY KEY (year, position)
+);
 
 CREATE TABLE IF NOT EXISTS imports (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -221,3 +243,56 @@ def delete_payment(conn: sqlite3.Connection, payment_id: int) -> None:
 def manual_payments(conn: sqlite3.Connection, number: str) -> list[dict]:
     return [dict(r) for r in conn.execute(
         "SELECT * FROM manual_payments WHERE invoice_number = ? ORDER BY paid_on, id", (number,))]
+
+
+def save_client_list(conn: sqlite3.Connection, year: str, names: list[str], source: str = "") -> None:
+    """Store the client list for a year, replacing any list already saved for it."""
+    with conn:
+        conn.execute("DELETE FROM client_lists WHERE year = ?", (year,))
+        conn.execute(
+            "INSERT INTO client_lists (year, source, uploaded_at) VALUES (?, ?, ?)",
+            (year, source, datetime.now().isoformat(timespec="seconds")),
+        )
+        conn.executemany(
+            "INSERT INTO client_list_names (year, position, name) VALUES (?, ?, ?)",
+            [(year, i, n) for i, n in enumerate(names)],
+        )
+
+
+def client_lists(conn: sqlite3.Connection) -> list[dict]:
+    """The saved lists, newest year first, with how many names each has."""
+    rows = conn.execute(
+        """SELECT l.year, l.source, l.uploaded_at, COUNT(n.name) AS names
+           FROM client_lists l LEFT JOIN client_list_names n ON n.year = l.year
+           GROUP BY l.year ORDER BY l.year DESC"""
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def client_list_names(conn: sqlite3.Connection, year: str) -> list[str]:
+    return [r[0] for r in conn.execute(
+        "SELECT name FROM client_list_names WHERE year = ? ORDER BY position", (year,))]
+
+
+def delete_client_list(conn: sqlite3.Connection, year: str) -> None:
+    with conn:
+        conn.execute("DELETE FROM client_lists WHERE year = ?", (year,))
+
+
+def remove_clients(conn: sqlite3.Connection, names: Iterable[str]) -> int:
+    """Hide clients from every page. Nothing is deleted, so they can be put back."""
+    now = datetime.now().isoformat(timespec="seconds")
+    with conn:
+        return conn.executemany(
+            "INSERT OR IGNORE INTO removed_clients (name, removed_at) VALUES (?, ?)",
+            [(n, now) for n in {n.strip() for n in names} if n]).rowcount
+
+
+def restore_clients(conn: sqlite3.Connection, names: Iterable[str]) -> int:
+    with conn:
+        return conn.executemany("DELETE FROM removed_clients WHERE name = ?",
+                                [(n,) for n in set(names)]).rowcount
+
+
+def removed_clients(conn: sqlite3.Connection) -> list[str]:
+    return [r[0] for r in conn.execute("SELECT name FROM removed_clients ORDER BY name COLLATE NOCASE")]

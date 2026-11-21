@@ -69,6 +69,25 @@ copies them into your current data without changing anything else.
 
 Do this again whenever you want fresh numbers.
 
+## See who you didn't bill for a tax year
+
+Open **Not billed**, pick the tax year, and choose the client list you exported from your
+tax software (Excel or CSV), or paste names one per line. The page lists everyone on that
+year's list who has no TaxDome invoice for that tax year.
+
+- An invoice counts for the tax year written on it ("Tax year 2024", "TY 2024",
+  "2024 tax return"). If none is written, it counts for the year before the invoice date.
+- Only client names are kept. SSNs, EINs, emails and addresses in the file are never saved.
+- Client lists are kept on their own. Saving one never changes your clients, invoices,
+  payments or bad debts, and saving a year again only replaces that year's list.
+
+## Remove clients you don't want
+
+On **All clients** or **Not billed**, tick the clients (the box at the top ticks them all) and
+press **Remove ticked clients**. They are hidden from every page and total, and stay hidden
+after a new TaxDome import. Nothing is deleted: they are listed under **Removed clients** at
+the bottom of All clients, where you can tick them and put them back.
+
 ## How the numbers are worked out
 
 - **Billed** is the invoice's services minus its discounts.
@@ -82,9 +101,13 @@ Do this again whenever you want fresh numbers.
   pays one later, only what is left unpaid counts as written off.
 - On the Summary, **billed = collected + owed + bad debt**, overall and for each year.
   Collected there counts what was paid toward each invoice, up to its amount. Money paid
-  above an invoice's amount (for example one payment that covered several invoices) is
-  shown on its own line as "paid above invoice", and those invoices are listed on Data checks.
-  Who paid and each client's page still show everything the client actually paid.
+  above an invoice's amount is shown separately, sorted into:
+  - **Card processing fees**: the client paid a card fee on top (about 3%);
+  - **Same payment shown on several invoices**: one payment covered several invoices and
+    TaxDome lists it in full on each. It is money received once. Who paid and each client's
+    Paid box count it once;
+  - **Other**: worth a look in TaxDome.
+  Data checks labels each of these invoices.
 - **Age** is counted from the invoice date.
 - The **year** on the summary and on Who owes is the invoice's year. On Who paid it is the
   year the invoice was paid.

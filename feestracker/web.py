@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import db, reports, storage
+from .clientlists import ListError, names_from_text, read_names
 from .taxdome import ImportError_, format_cents, read_invoices
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -47,6 +48,7 @@ h1 { font-size:24px; margin:4px 0 16px } h2 { font-size:19px; margin:28px 0 10px
 table { border-collapse:collapse; width:100% }
 th, td { padding:8px 12px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top }
 th { font-size:13px; color:var(--muted); font-weight:600; white-space:nowrap }
+td.tick, th.tick { width:1%; padding-right:0 }
 td.n, th.n { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums }
 tr:last-child td { border-bottom:0 } tfoot td { font-weight:650 }
 form.inline { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:0 0 14px }
@@ -81,6 +83,7 @@ NAV = [
     ("/paid", "Who paid"),
     ("/clients", "All clients"),
     ("/import", "Import"),
+    ("/not-billed", "Not billed"),
     ("/bad-debts", "Bad debts"),
     ("/checks", "Data checks"),
     ("/data", "Your data & updates"),
@@ -141,12 +144,27 @@ def home(conn: sqlite3.Connection, today: date) -> bytes:
         return page("Summary", "<h1>Summary</h1>" + empty_state(), "/")
     owing = reports.who_owes(conn, today)
     ages = reports.age_totals(owing)
+    extra = reports.overpayments(conn)
+    extra_totals = reports.overpayment_totals(conn, extra)
+    card_fees_by_year: dict[str, int] = {}
+    for number, o in extra.items():
+        if o["kind"] == "card_fee":
+            y = conn.execute("SELECT substr(invoice_date, 1, 4) FROM invoices WHERE number = ?",
+                             (number,)).fetchone()[0] or "No date"
+            card_fees_by_year[y] = card_fees_by_year.get(y, 0) + o["cents"]
     overpaid = ""
-    if s.overpaid_cents:
+    if extra:
+        lines = "".join(
+            f"<tr><td>{label}<div class='small muted'>{explain}</div></td>"
+            f"<td class=n>{money(extra_totals[key]['cents'])}</td>"
+            f"<td class='n muted'>{count(extra_totals[key]['invoices'], 'invoice')}</td></tr>"
+            for key, label, explain in reports.OVERPAYMENT_KINDS if extra_totals[key]["invoices"]
+        )
         overpaid = (
-            f"<p class='small muted'>Not included above: {money(s.overpaid_cents)} paid above the invoice "
-            f"amount on {count(s.overpaid_invoices, 'invoice')}, for example one payment that covered "
-            "several invoices. See <a href='/checks'>Data checks</a>.</p>"
+            "<h2>Paid above the invoice amount</h2>"
+            "<p class='small muted'>Not part of the boxes above. Each invoice is listed on "
+            "<a href='/checks'>Data checks</a>.</p>"
+            f"<div class=wrap><table><tbody>{lines}</tbody></table></div>"
         )
     cards = f"""
     <div class=cards>
@@ -173,7 +191,7 @@ def home(conn: sqlite3.Connection, today: date) -> bytes:
             <td class=n>{money(y['billed'])}</td><td class="n ok">{money(y['collected'])}</td>
             <td class="n owe">{money(y['outstanding'])}</td>
             <td class="n muted">{money(y['written_off'])}</td>
-            <td class="n muted">{money(y['overpaid']) if y['overpaid'] else '–'}</td>
+            <td class="n muted">{money(card_fees_by_year.get(y['year'], 0)) if card_fees_by_year.get(y['year']) else '–'}</td>
             <td class=n><a href="/owes?year={quote(y['year'])}">{y['clients_owing']} clients</a></td></tr>"""
         for y in reports.by_year(conn)
     )
@@ -188,10 +206,10 @@ def home(conn: sqlite3.Connection, today: date) -> bytes:
     <h2>Year by year</h2>
     <div class=wrap><table><thead><tr><th>Invoice year</th><th class=n>Invoices</th>
       <th class=n>Billed</th><th class=n>Collected</th><th class=n>Still owed</th>
-      <th class=n>Bad debt</th><th class=n>Paid above invoice</th><th class=n>Clients owing</th></tr></thead>
+      <th class=n>Bad debt</th><th class=n>Card fees</th><th class=n>Clients owing</th></tr></thead>
       <tbody>{year_rows}</tbody></table></div>
     <p class="small muted">In each year, billed = collected + still owed + bad debt.
-      “Paid above invoice” is extra money received on top of that.</p>
+      “Card fees” is what clients paid on top for paying by card.</p>
     <h2>How old is the money owed?</h2>
     <div class=wrap><table><tbody>{age_rows}</tbody></table></div>
     <h2>Biggest balances</h2>
@@ -262,20 +280,51 @@ def paid(conn: sqlite3.Connection, year: str) -> bytes:
     return page("Who paid", body, "/paid")
 
 
-def all_clients(conn: sqlite3.Connection, q: str) -> bytes:
+def tick(name: str) -> str:
+    return f"<td class=tick><input type=checkbox name=name value=\"{escape(name)}\"></td>"
+
+
+TICK_ALL = ("<th class=tick><input type=checkbox title='Tick all' "
+            "onclick=\"for (const b of this.closest('table').querySelectorAll('tbody input[type=checkbox]'))"
+            " b.checked = this.checked\"></th>")
+
+
+def remove_form(table: str, back: str) -> str:
+    """A table of clients with tick boxes and one button to remove the ticked ones."""
+    return f"""<form method=post action="/clients/remove">
+    <input type=hidden name=back value="{escape(back)}">
+    {table}
+    <p><button>Remove ticked clients</button> <span class="small muted">They are hidden from every
+      page and total, and stay hidden after a new import. You can put them back on All clients.</span></p>
+    </form>"""
+
+
+def all_clients(conn: sqlite3.Connection, q: str, message: str = "") -> bytes:
     rows = "".join(
-        f"<tr><td>{client_link(c['client'])}</td><td class=n>{c['invoices']}</td>"
+        f"<tr>{tick(c['client'])}<td>{client_link(c['client'])}</td><td class=n>{c['invoices']}</td>"
         f"<td class=n>{money(c['billed'])}</td><td class='n ok'>{money(c['paid'])}</td>"
         f"<td class='n {'owe' if c['owed'] else 'muted'}'>{money(c['owed'])}</td></tr>"
         for c in reports.clients(conn, q)
     )
+    back = "/clients" + (f"?q={quote(q)}" if q else "")
+    table = f"""<div class=wrap><table><thead><tr>{TICK_ALL}<th>Client</th><th class=n>Invoices</th>
+      <th class=n>Billed</th><th class=n>Paid</th><th class=n>Owes</th></tr></thead>
+      <tbody>{rows or '<tr><td colspan=6 class=muted>No clients found.</td></tr>'}</tbody></table></div>"""
+    removed = db.removed_clients(conn)
+    removed_html = ""
+    if removed:
+        items = "".join(f"<tr>{tick(n)}<td>{escape(n)}</td></tr>" for n in removed)
+        removed_html = f"""<h2>Removed clients ({len(removed)})</h2>
+    <form method=post action="/clients/restore">
+    <div class=wrap><table><thead><tr>{TICK_ALL}<th>Client</th></tr></thead><tbody>{items}</tbody></table></div>
+    <p><button>Put ticked clients back</button></p></form>"""
     body = f"""<h1>All clients</h1>
+    {message}
     <form class=inline method=get action="/clients">
       <input type=search name=q value="{escape(q)}" placeholder="Search by name" autofocus>
       <button>Search</button></form>
-    <div class=wrap><table><thead><tr><th>Client</th><th class=n>Invoices</th><th class=n>Billed</th>
-      <th class=n>Paid</th><th class=n>Owes</th></tr></thead>
-      <tbody>{rows or '<tr><td colspan=5 class=muted>No clients found.</td></tr>'}</tbody></table></div>"""
+    {remove_form(table, back)}
+    {removed_html}"""
     return page("All clients", body, "/clients")
 
 
@@ -312,7 +361,11 @@ def client_page(conn: sqlite3.Connection, today: date, name: str) -> bytes:
     if not invoices:
         return page("Client", "<h1>Client not found</h1><p><a href='/clients'>All clients</a></p>")
     billed = sum(i["total_cents"] for i in invoices)
-    paid_ = sum(i["paid_cents"] for i in invoices)
+    extra = reports.overpayments(conn)
+    for i in invoices:
+        i["extra"] = extra.get(i["number"])
+    paid_ = sum(i["paid_cents"] - (i["extra"]["cents"] if i["extra"] and i["extra"]["kind"] == "shared" else 0)
+                for i in invoices)
     owed = sum(i["owed_cents"] for i in invoices)
     written_off = sum(i["written_off_cents"] for i in invoices)
     open_invs = [i for i in invoices if i["owed_cents"] > 0]
@@ -377,6 +430,10 @@ def bad_debt_button(number: str, mark: bool, back: str) -> str:
 def paid_cell(conn: sqlite3.Connection, inv: dict, client: str) -> str:
     """What was paid, listing any payments entered here with a Delete button each."""
     out = money(inv["paid_cents"])
+    extra = inv.get("extra")
+    if extra:
+        label = {k: lbl for k, lbl, _ in reports.OVERPAYMENT_KINDS}[extra["kind"]]
+        out += f"<div class='small muted'>incl. {money(extra['cents'])}: {label.lower()}</div>"
     if not inv["manual_paid_cents"]:
         return out
     back = "/client?name=" + quote(client)
@@ -580,6 +637,91 @@ def data_page(conn: sqlite3.Connection, db_path: Path, message: str = "") -> byt
     return page("Your data & updates", body, "/data")
 
 
+KIND_NOTE = {
+    "in_taxdome": "In TaxDome, but no invoice for this tax year",
+    "maybe": "Not sure of the TaxDome name",
+    "never": "No invoices in TaxDome at all",
+}
+
+
+def tax_year_options(today: date) -> list[str]:
+    return [str(y) for y in range(today.year, today.year - 9, -1)]
+
+
+def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: str = "") -> bytes:
+    lists = db.client_lists(conn)
+    years = [l["year"] for l in lists]
+    if year not in years:
+        year = years[0] if years else ""
+    tabs = " ".join(
+        f"<a href='/not-billed?year={quote(y)}' class='pill' style='{'font-weight:650' if y == year else ''}'>"
+        f"{escape(y)}</a>" for y in years)
+    table = ""
+    if year:
+        nb = reports.not_billed(conn, year)
+        counts = {k: sum(1 for r in nb["rows"] if r["kind"] == k) for k in KIND_NOTE}
+        rows = "".join(
+            f"<tr>{tick(r['client'] or r['name'])}<td>{client_link(r['client']) if r['client'] else escape(r['name'])}"
+            + (f"<div class='small muted'>On your list as {escape(r['name'])}</div>"
+               if r["client"] and r["client"].lower() != r["name"].lower() else "")
+            + f"</td><td class=small>{KIND_NOTE[r['kind']]}"
+            + (f": maybe {client_link(r['maybe'])}" if r["maybe"] else "")
+            + f"</td><td class=muted>{escape(', '.join(r['tax_years'])) or '–'}</td>"
+            f"<td class=muted>{escape(r['last_invoice']) or '–'}</td>"
+            f"<td class='n {'owe' if r['owed'] else 'muted'}'>{money(r['owed'])}</td></tr>"
+            for r in nb["rows"])
+        table = f"""
+    <div class=cards>
+      <div class=card><div class=label>Not billed for {escape(year)}</div>
+        <div class="big owe">{len(nb['rows'])}</div>
+        <div class="small muted">of {count(nb['listed'], 'client')} on your {escape(year)} list</div></div>
+      <div class=card><div class=label>In TaxDome, no {escape(year)} invoice</div>
+        <div class=big>{counts['in_taxdome']}</div></div>
+      <div class=card><div class=label>Not sure of TaxDome name</div>
+        <div class="big warn">{counts['maybe']}</div></div>
+      <div class=card><div class=label>No invoices in TaxDome</div>
+        <div class="big muted">{counts['never']}</div></div>
+    </div>
+    <p class="small muted">An invoice counts for the tax year written on it (“Tax year {escape(year)}”,
+      “TY {escape(year)}”, “{escape(year)} tax return”). If none is written, it counts for the year before
+      the invoice date, because {escape(year)} returns are usually billed in {int(year) + 1}.
+      <a href="/not-billed.csv?year={quote(year)}">Download this list (CSV)</a></p>
+    {remove_form(f"""<div class=wrap><table><thead><tr>{TICK_ALL}<th>Client</th><th>Why it's here</th>
+      <th>Tax years billed</th><th>Last invoice</th><th class=n>Owes now</th></tr></thead>
+      <tbody>{rows or '<tr><td colspan=6 class=muted>Everyone on this list was billed.</td></tr>'}</tbody>
+    </table></div>""", "/not-billed?year=" + quote(year))}"""
+    options = "".join(f"<option{' selected' if y == str(today.year - 1) else ''}>{y}</option>"
+                      for y in tax_year_options(today))
+    upload = f"""<h2>Add or replace a client list</h2>
+    <form method=post action="/not-billed" enctype="multipart/form-data" class="payform">
+      <p><label>Tax year <select name=year>{options}</select></label></p>
+      <p><label>Client list from your tax software (Excel .xlsx or CSV): <input type=file name=file
+        accept=".csv,.xlsx,.xlsm,.txt"></label></p>
+      <p><label>or paste names, one per line:<br><textarea name=names rows=3></textarea></label></p>
+      <p><button>Save list</button> <span class="small muted">Only client names are kept. SSNs, EINs,
+        emails and addresses in the file are never saved.</span></p>
+      <p class="small muted">Client lists are kept on their own: saving one never changes your clients,
+        invoices, payments or bad debts, and saving a year again only replaces that year's list.</p>
+    </form>"""
+    body = f"""<h1>Not billed{' for tax year ' + escape(year) if year else ''}</h1>
+    {message}
+    <p class=muted>Clients on your client list for a tax year who have no TaxDome invoice for that year.</p>
+    {('<p>Tax year: ' + tabs + '</p>') if years else '<div class=note>Add your client list for a tax year below to see who wasn’t billed.</div>'}
+    {table}
+    {upload}"""
+    return page("Not billed", body, "/not-billed")
+
+
+def not_billed_csv(conn: sqlite3.Connection, year: str) -> bytes:
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["Client", "Name in TaxDome", "Why it's here", "Tax years billed", "Last invoice", "Owes now"])
+    for r in reports.not_billed(conn, year)["rows"]:
+        w.writerow([r["name"], r["client"] or r["maybe"] or "", KIND_NOTE[r["kind"]],
+                    ", ".join(r["tax_years"]), r["last_invoice"], f"{r['owed'] / 100:.2f}"])
+    return out.getvalue().encode("utf-8-sig")
+
+
 def import_page(message: str = "") -> bytes:
     body = f"""<h1>Import from TaxDome</h1>
     {message}
@@ -594,16 +736,35 @@ def import_page(message: str = "") -> bytes:
 
 def checks(conn: sqlite3.Connection) -> bytes:
     found = reports.problems(conn)
+    extra = reports.overpayments(conn)
+    labels = {k: label for k, label, _ in reports.OVERPAYMENT_KINDS}
+
+    def what(p: dict) -> str:
+        lines = [escape(x) for x in p["problems"].splitlines()]
+        o = extra.get(p["number"])
+        if o:
+            css = "muted" if o["kind"] != "other" else "warn"
+            lines.append(f"<span class={css}><b>{labels[o['kind']]}</b>: {money(o['cents'])} "
+                         "above the invoice amount</span>")
+        return "<br>".join(lines)
+
     rows = "".join(
         f"<tr><td>{escape(p['number'])}</td><td>{client_link(p['client'])}</td>"
         f"<td>{escape(p['status'])}</td><td>{escape(p['invoice_date'][:10])}</td>"
-        f"<td class='small warn'>{'<br>'.join(escape(x) for x in p['problems'].splitlines())}</td></tr>"
+        f"<td class='small warn'>{what(p)}</td></tr>"
         for p in found
+    )
+    totals = reports.overpayment_totals(conn, extra)
+    summary = "".join(
+        f"<tr><td>{label}<div class='small muted'>{explain}</div></td>"
+        f"<td class=n>{money(totals[k]['cents'])}</td><td class='n muted'>{count(totals[k]['invoices'], 'invoice')}</td></tr>"
+        for k, label, explain in reports.OVERPAYMENT_KINDS if totals[k]["invoices"]
     )
     body = f"""<h1>Data checks</h1>
     <p class="muted">Invoices where the TaxDome export doesn't add up. These don't stop anything
       from working, but they may be worth fixing in TaxDome. Paid invoices always count as
       owing nothing.</p>
+    {'<h2>Paid above the invoice amount</h2><div class=wrap><table><tbody>' + summary + '</tbody></table></div><h2>Invoices</h2>' if summary else ''}
     <div class=wrap><table><thead><tr><th>Invoice</th><th>Client</th><th>Status</th><th>Date</th>
       <th>What looks off</th></tr></thead>
       <tbody>{rows or '<tr><td colspan=5 class=muted>Everything adds up.</td></tr>'}</tbody></table></div>"""
@@ -613,17 +774,24 @@ def checks(conn: sqlite3.Connection) -> bytes:
 # ---------------------------------------------------------------- server
 
 
-def read_upload(content_type: str, body: bytes) -> bytes | None:
-    """Return the bytes of the 'file' field from a multipart form body."""
+def read_form(content_type: str, body: bytes) -> dict[str, tuple[str, bytes]]:
+    """The fields of a multipart form body, as {name: (filename, bytes)}."""
     msg = email.parser.BytesParser(policy=email.policy.HTTP).parsebytes(
         b"Content-Type: " + content_type.encode("latin-1") + b"\r\n\r\n" + body
     )
     if not msg.is_multipart():
-        return None
+        return {}
+    fields = {}
     for part in msg.iter_parts():
-        if part.get_param("name", header="content-disposition") == "file":
-            return part.get_payload(decode=True)
-    return None
+        name = part.get_param("name", header="content-disposition")
+        if name:
+            fields[name] = (part.get_filename() or "", part.get_payload(decode=True) or b"")
+    return fields
+
+
+def read_upload(content_type: str, body: bytes) -> bytes | None:
+    """Return the bytes of the 'file' field from a multipart form body."""
+    return read_form(content_type, body).get("file", ("", b""))[1] or None
 
 
 def parse_amount(text: str) -> int | None:
@@ -683,6 +851,12 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                     self._send(client_page(conn, today, q.get("name", "")))
                 elif url.path == "/import":
                     self._send(import_page())
+                elif url.path == "/not-billed":
+                    self._send(not_billed_page(conn, today, q.get("year", "")))
+                elif url.path == "/not-billed.csv":
+                    self._send(not_billed_csv(conn, q.get("year", "")), "text/csv; charset=utf-8",
+                               extra={"Content-Disposition":
+                                      f'attachment; filename="not-billed-{quote(q.get("year", ""))}.csv"'})
                 elif url.path == "/data":
                     self._send(data_page(conn, db_path))
                 elif url.path == "/checks":
@@ -708,6 +882,12 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                 return
             if path == "/bad-debt":
                 self._bad_debt()
+                return
+            if path == "/not-billed":
+                self._save_list()
+                return
+            if path in ("/clients/remove", "/clients/restore"):
+                self._remove_clients(path)
                 return
             if path in ("/data/bring-back", "/update"):
                 self._data_action(path)
@@ -761,6 +941,56 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
             if not back.startswith("/") or back.startswith("//"):
                 back = "/"
             self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
+
+        def _remove_clients(self, path: str):
+            length = min(int(self.headers.get("Content-Length") or 0), 1_000_000)
+            fields = parse_qs(self.rfile.read(length).decode("utf-8"))
+            names = fields.get("name", [])
+            back = (fields.get("back") or ["/clients"])[0]
+            if not back.startswith("/") or back.startswith("//"):
+                back = "/clients"
+            conn = db.connect(db_path)
+            try:
+                if path == "/clients/remove":
+                    db.remove_clients(conn, names)
+                else:
+                    db.restore_clients(conn, names)
+            finally:
+                conn.close()
+            self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
+
+        def _save_list(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            today = today_fn()
+            conn = db.connect(db_path)
+            try:
+                def reply(text: str, ok: bool, year: str = "", status=HTTPStatus.OK):
+                    css = "ok" if ok else "owe"
+                    self._send(not_billed_page(conn, today, year, f"<div class='note {css}'>{text}</div>"),
+                               status=status)
+
+                if length > MAX_UPLOAD_BYTES:
+                    return reply("That file is too big.", False, status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                form = read_form(self.headers.get("Content-Type", ""), self.rfile.read(length))
+                year = form.get("year", ("", b""))[1].decode("utf-8", "replace").strip()
+                if year not in tax_year_options(today):
+                    return reply("Please choose a tax year.", False, status=HTTPStatus.BAD_REQUEST)
+                filename, data = form.get("file", ("", b""))
+                pasted = form.get("names", ("", b""))[1].decode("utf-8", "replace")
+                try:
+                    if data:
+                        names, source = read_names(data, filename), filename
+                    elif pasted.strip():
+                        names, source = names_from_text(pasted), "pasted names"
+                    else:
+                        return reply("Please choose a file or paste some names.", False,
+                                     status=HTTPStatus.BAD_REQUEST)
+                except ListError as exc:
+                    return reply(escape(str(exc)), False, status=HTTPStatus.BAD_REQUEST)
+                db.save_client_list(conn, year, names, source)
+                reply(f"Saved your {escape(year)} list with {count(len(names), 'client')}.", True, year)
+            finally:
+                conn.close()
 
         def _data_action(self, path: str):
             length = min(int(self.headers.get("Content-Length") or 0), 10_000)

@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+import re
 from datetime import date
+
+from . import db
+from .clientlists import Matcher
 
 
 # Age buckets for money still owed, counted from the invoice date.
@@ -88,7 +92,6 @@ def by_year(conn: sqlite3.Connection) -> list[dict]:
                   COUNT(*) AS invoices,
                   SUM(total_cents) AS billed,
                   SUM(collected_cents) AS collected,
-                  SUM(overpaid_cents) AS overpaid,
                   SUM(owed_cents) AS outstanding,
                   SUM(owed_cents > 0) AS open_invoices,
                   COUNT(DISTINCT CASE WHEN owed_cents > 0 THEN client END) AS clients_owing,
@@ -125,12 +128,80 @@ def age_totals(owing: list[dict]) -> dict[str, int]:
     return {key: sum(c[key] for c in owing) for key, *_ in AGE_BUCKETS}
 
 
+# What the money paid above an invoice's amount is.
+OVERPAYMENT_KINDS = (
+    ("card_fee", "Card processing fees",
+     "The client paid a card fee on top of the invoice (about 3%)."),
+    ("shared", "Same payment shown on several invoices",
+     "One payment covered several invoices, and TaxDome lists it in full on each of them. "
+     "It is money received once, not extra money."),
+    ("other", "Other",
+     "A payment on an invoice that was already paid or had nothing to pay. Worth a look in TaxDome."),
+)
+CARD_FEE_RATE = 0.036  # fees seen are 3%; allow a little more, plus $1 for rounding
+
+
+def overpayments(conn: sqlite3.Connection) -> dict[str, dict]:
+    """For each invoice paid above its amount: what the extra is and how much.
+
+    TaxDome lists a payment that covered several invoices in full on each of them,
+    so the same amount shows up on more than one invoice of the same client.
+    """
+    invoices = {r["number"]: dict(r) for r in conn.execute(
+        "SELECT number, client, total_cents, collected_cents, overpaid_cents FROM invoice_view")}
+    payments: dict[str, list[int]] = {}
+    for p in conn.execute("SELECT invoice_number, amount_cents FROM payments WHERE status = 'succeeded'"):
+        if p["invoice_number"] in invoices:  # not a removed client's
+            payments.setdefault(p["invoice_number"], []).append(p["amount_cents"])
+    listed_on: dict[tuple, set] = {}
+    for number, amounts in payments.items():
+        for amount in amounts:
+            listed_on.setdefault((invoices[number]["client"], amount), set()).add(number)
+    out = {}
+    for number, inv in invoices.items():
+        extra = inv["overpaid_cents"]
+        if extra <= 0:
+            continue
+        shared = [a for a in payments.get(number, []) if len(listed_on[(inv["client"], a)]) > 1]
+        # A payment that is exactly the total of all the invoices it is listed on.
+        covers_all = any(
+            abs(a - sum(invoices[n]["total_cents"] for n in listed_on[(inv["client"], a)])) <= max(100, a // 100)
+            for a in shared)
+        if covers_all:
+            kind = "shared"
+        elif extra <= round(inv["collected_cents"] * CARD_FEE_RATE) + 100:
+            kind = "card_fee"
+        elif shared:
+            kind = "shared"
+        else:
+            kind = "other"
+        out[number] = {"kind": kind, "cents": extra}
+    return out
+
+
+def overpayment_totals(conn: sqlite3.Connection, found: dict | None = None) -> dict[str, dict]:
+    found = overpayments(conn) if found is None else found
+    totals = {k: {"cents": 0, "invoices": 0} for k, *_ in OVERPAYMENT_KINDS}
+    for o in found.values():
+        totals[o["kind"]]["cents"] += o["cents"]
+        totals[o["kind"]]["invoices"] += 1
+    return totals
+
+
+def counted_twice(conn: sqlite3.Connection) -> dict[str, int]:
+    """Per invoice, money shown as paid that is really a payment counted on another invoice."""
+    return {n: o["cents"] for n, o in overpayments(conn).items() if o["kind"] == "shared"}
+
+
 def who_paid(conn: sqlite3.Connection, year: str | None = None) -> list[dict]:
-    """Clients who have paid, most collected first. Year is the year it was paid."""
-    sql = """SELECT client,
-                    SUM(paid_cents) AS paid,
-                    COUNT(*) AS invoices,
-                    MAX(paid_at) AS last_paid
+    """Clients who have paid, most collected first. Year is the year it was paid.
+
+    A payment that TaxDome lists on several invoices is counted once.
+    """
+    twice = counted_twice(conn)
+    sql = """SELECT client, number,
+                    paid_cents AS paid,
+                    paid_at
              FROM invoice_view
              WHERE paid_cents > 0"""
     params: list = []
@@ -138,8 +209,13 @@ def who_paid(conn: sqlite3.Connection, year: str | None = None) -> list[dict]:
         # Paid invoices have a paid date; part-paid ones don't, so use the invoice date.
         sql += " AND substr(COALESCE(NULLIF(paid_at, ''), invoice_date), 1, 4) = ?"
         params.append(year)
-    sql += " GROUP BY client ORDER BY paid DESC, client"
-    return [dict(r) for r in conn.execute(sql, params)]
+    clients: dict[str, dict] = {}
+    for r in conn.execute(sql, params):
+        c = clients.setdefault(r["client"], {"client": r["client"], "paid": 0, "invoices": 0, "last_paid": ""})
+        c["paid"] += r["paid"] - twice.get(r["number"], 0)
+        c["invoices"] += 1
+        c["last_paid"] = max(c["last_paid"], r["paid_at"] or "")
+    return sorted(clients.values(), key=lambda c: (-c["paid"], c["client"]))
 
 
 def years(conn: sqlite3.Connection) -> list[str]:
@@ -240,3 +316,62 @@ def unpaid_by_years(conn: sqlite3.Connection, years: list[str]) -> list[dict]:
 def _last_paid(conn: sqlite3.Connection) -> dict[str, str]:
     return {r[0]: r[1] or "" for r in conn.execute(
         "SELECT client, MAX(NULLIF(paid_at, '')) FROM invoice_view WHERE paid_cents > 0 GROUP BY client")}
+
+
+# The tax year an invoice is for: a year written in its services or description
+# ("Tax year 2024", "TY 2024", "2024 tax return"), otherwise the year before the
+# invoice date, because a year's returns are usually billed the next year.
+TAX_YEAR = re.compile(
+    r"(?:tax\s*year|\bty|\bfy|year)\s*[-:]?\s*(20\d\d)\b"
+    r"|(20\d\d)\s*(?:tax|return|1040|1120|1065|federal|fed\b|state)", re.I)
+
+
+def tax_years_of(text: str, invoice_date: str) -> set[str]:
+    named = {a or b for a, b in TAX_YEAR.findall(text)}
+    if named:
+        return named
+    return {str(int(invoice_date[:4]) - 1)} if invoice_date[:4].isdigit() else set()
+
+
+def client_tax_years(conn: sqlite3.Connection) -> dict[str, set[str]]:
+    """Per TaxDome client, the tax years they have been invoiced for."""
+    titles: dict[str, list[str]] = {}
+    for r in conn.execute("SELECT invoice_number, title FROM line_items WHERE kind = 'service'"):
+        titles.setdefault(r["invoice_number"], []).append(r["title"])
+    out: dict[str, set[str]] = {}
+    for r in conn.execute("SELECT number, client, invoice_date, description FROM invoices"):
+        text = (r["description"] or "") + "\n" + "\n".join(titles.get(r["number"], []))
+        out.setdefault(r["client"], set()).update(tax_years_of(text, r["invoice_date"]))
+    return out
+
+
+def not_billed(conn: sqlite3.Connection, year: str) -> dict:
+    """Clients on the client list for a tax year who have no invoice for that tax year.
+
+    Clients in TaxDome come first, then names that may be in TaxDome under another
+    spelling, then clients with no TaxDome invoices at all.
+    """
+    names = db.client_list_names(conn, year)
+    years = client_tax_years(conn)
+    owed = {r["client"]: r["owed"] for r in conn.execute(
+        "SELECT client, SUM(owed_cents) AS owed FROM invoice_view GROUP BY client")}
+    last = {r["client"]: r["last"] for r in conn.execute(
+        "SELECT client, MAX(invoice_date) AS last FROM invoice_view GROUP BY client")}
+    taxdome = Matcher(list(years))
+    removed = set(db.removed_clients(conn))
+    rows = []
+    for name in names:
+        m = taxdome.best(name)
+        client = m.found if m.same else None
+        if name in removed or client in removed:
+            continue
+        billed = sorted(years.get(client, set())) if client else []
+        if year in billed:
+            continue
+        kind = "in_taxdome" if client else ("maybe" if m.maybe else "never")
+        rows.append({"name": name, "client": client, "maybe": m.found if kind == "maybe" else None,
+                     "kind": kind, "tax_years": billed, "last_invoice": (last.get(client) or "")[:10],
+                     "owed": owed.get(client, 0) if client else 0})
+    order = {"in_taxdome": 0, "maybe": 1, "never": 2}
+    rows.sort(key=lambda r: (order[r["kind"]], r["name"].lower()))
+    return {"year": year, "listed": len(names), "rows": rows}

@@ -159,6 +159,9 @@ def bring_back_adjustments(conn: sqlite3.Connection, old: Path) -> dict[str, int
                            WHERE m.invoice_number = p.invoice_number AND m.paid_on = p.paid_on
                              AND m.amount_cents = p.amount_cents AND m.note = p.note)"""
                 ).rowcount
+            if "removed_clients" in tables:
+                conn.execute("""INSERT OR IGNORE INTO removed_clients (name, removed_at)
+                                SELECT name, removed_at FROM old.removed_clients""")
     finally:
         conn.execute("DETACH DATABASE old")
     return {"bad_debts": marks, "payments": payments}
