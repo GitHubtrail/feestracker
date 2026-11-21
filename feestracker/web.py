@@ -9,6 +9,7 @@ import csv
 import email.parser
 import email.policy
 import io
+import re
 import sqlite3
 from datetime import date
 from html import escape
@@ -64,6 +65,9 @@ form.act button { background:transparent; color:var(--accent); border:1px solid 
 .pill.bad { color:var(--muted); background:var(--bg) }
 fieldset { border:1px solid var(--line); border-radius:10px; background:var(--card); padding:12px 16px; margin:0 0 16px }
 fieldset label { margin-right:14px; white-space:nowrap }
+details.act summary { cursor:pointer; color:var(--accent); margin-top:6px }
+details.act input { font:inherit; padding:4px 6px; border:1px solid var(--line); border-radius:6px;
+                    background:var(--bg); color:var(--ink) }
 .stack > * { margin:0 0 10px }
 """
 
@@ -314,8 +318,8 @@ def client_page(conn: sqlite3.Connection, today: date, name: str) -> bytes:
             f"<tr><td>{escape(i['number'])}</td><td>{escape(i['invoice_date'][:10])}</td>"
             f"<td><span class='pill {STATUS_CLASS.get(i['status'], '')}'>{escape(i['status'])}</span>{age}</td>"
             f"<td class=small>{services}</td><td class=n>{money(i['total_cents'])}</td>"
-            f"<td class='n ok'>{money(i['paid_cents'])}</td>"
-            f"<td class=n>{owes_cell(i, name)}</td></tr>"
+            f"<td class='n ok'>{paid_cell(conn, i, name)}</td>"
+            f"<td class=n>{owes_cell(i, name, today)}</td></tr>"
         )
     reminder = ""
     if open_invs:
@@ -359,7 +363,45 @@ def bad_debt_button(number: str, mark: bool, back: str) -> str:
     )
 
 
-def owes_cell(inv: dict, client: str) -> str:
+def paid_cell(conn: sqlite3.Connection, inv: dict, client: str) -> str:
+    """What was paid, listing any payments entered here with a Delete button each."""
+    out = money(inv["paid_cents"])
+    if not inv["manual_paid_cents"]:
+        return out
+    back = "/client?name=" + quote(client)
+    for p in db.manual_payments(conn, inv["number"]):
+        note = f" · {escape(p['note'])}" if p["note"] else ""
+        out += (
+            f"<div class='small muted'>{money(p['amount_cents'])} on {escape(p['paid_on'])}{note}"
+            f"<form class=act method=post action='/payment' "
+            f"onsubmit=\"return confirm('Delete this payment?')\">"
+            f"<input type=hidden name=action value=delete>"
+            f"<input type=hidden name=id value='{p['id']}'>"
+            f"<input type=hidden name=back value='{escape(back)}'><button>Delete</button></form></div>"
+        )
+    if inv["status"] == "paid":
+        out += ("<div class='small warn'>TaxDome now shows this invoice as paid. If that includes "
+                "the payment you entered here, delete yours so it isn't counted twice.</div>")
+    return out
+
+
+def payment_form(number: str, back: str, today: date) -> str:
+    """A small form to record money received for one invoice, such as a part payment."""
+    return (
+        "<details class=act><summary class=small>Record payment</summary>"
+        "<form method=post action='/payment' class=stack style='margin-top:6px;text-align:left'>"
+        "<input type=hidden name=action value=add>"
+        f"<input type=hidden name=number value='{escape(number)}'>"
+        f"<input type=hidden name=back value='{escape(back)}'>"
+        "<div><label class=small>Amount received<br><input name=amount inputmode=decimal required "
+        "placeholder='500.00' size=10></label></div>"
+        f"<div><label class=small>Date<br><input type=date name=paid_on value='{today.isoformat()}' required></label></div>"
+        "<div><label class=small>Note (optional)<br><input name=note placeholder='Zelle' size=14></label></div>"
+        "<div><button>Save payment</button></div></form></details>"
+    )
+
+
+def owes_cell(inv: dict, client: str, today: date) -> str:
     back = "/client?name=" + quote(client)
     if inv["bad_debt"]:
         return (
@@ -368,9 +410,9 @@ def owes_cell(inv: dict, client: str) -> str:
             + bad_debt_button(inv["number"], False, back)
         )
     if inv["owed_cents"] > 0:
-        return f"<span class=owe>{money(inv['owed_cents'])}</span>" + bad_debt_button(
-            inv["number"], True, back
-        )
+        return (f"<span class=owe>{money(inv['owed_cents'])}</span>"
+                + payment_form(inv["number"], back, today)
+                + bad_debt_button(inv["number"], True, back))
     return f"<span class=muted>{money(0)}</span>"
 
 
@@ -695,6 +737,15 @@ def read_upload(content_type: str, body: bytes) -> bytes | None:
     return read_form(content_type, body).get("file", ("", None))[1] or None
 
 
+def parse_amount(text: str) -> int | None:
+    """'$1,250.50' -> 125050 cents. None if it isn't a number."""
+    cleaned = text.strip().replace("$", "").replace(",", "").replace(" ", "")
+    if not re.fullmatch(r"\d{1,9}(\.\d{1,2})?|\.\d{1,2}", cleaned):
+        return None
+    whole, _, frac = cleaned.partition(".")
+    return int(whole or 0) * 100 + int((frac + "00")[:2])
+
+
 def make_handler(db_path: Path, today_fn=date.today):
     class Handler(BaseHTTPRequestHandler):
         server_version = "FeesTracker"
@@ -780,6 +831,9 @@ def make_handler(db_path: Path, today_fn=date.today):
             if path == "/bad-debt":
                 self._bad_debt()
                 return
+            if path == "/payment":
+                self._payment()
+                return
             if path == "/lists":
                 self._save_list()
                 return
@@ -831,6 +885,38 @@ def make_handler(db_path: Path, today_fn=date.today):
             back = form.get("back", "/")
             if not back.startswith("/") or back.startswith("//"):
                 back = "/"
+            self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
+
+        def _payment(self):
+            length = min(int(self.headers.get("Content-Length") or 0), 10_000)
+            form = {k: v[0] for k, v in parse_qs(self.rfile.read(length).decode("utf-8")).items()}
+            back = form.get("back", "/")
+            if not back.startswith("/") or back.startswith("//"):
+                back = "/"
+            conn = db.connect(db_path)
+            try:
+                if form.get("action") == "delete":
+                    if form.get("id", "").isdigit():
+                        db.delete_payment(conn, int(form["id"]))
+                else:
+                    cents = parse_amount(form.get("amount", ""))
+                    paid_on = form.get("paid_on", "")
+                    try:
+                        date.fromisoformat(paid_on)
+                    except ValueError:
+                        paid_on = ""
+                    if cents is None or cents <= 0 or not paid_on:
+                        self._send(page("Payment not saved",
+                                        "<h1>Payment not saved</h1><p>Please enter an amount such as "
+                                        f"500 or 1,250.50 and a date. <a href='{escape(back)}'>Go back</a></p>"),
+                                   status=HTTPStatus.BAD_REQUEST)
+                        return
+                    if not db.add_payment(conn, form.get("number", ""), cents, paid_on, form.get("note", "")):
+                        self._send(page("Not found", "<h1>Invoice not found</h1>"),
+                                   status=HTTPStatus.NOT_FOUND)
+                        return
+            finally:
+                conn.close()
             self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
 
         def _save_list(self):

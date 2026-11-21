@@ -29,6 +29,11 @@ folder next to the app and is never uploaded anywhere or added to this repositor
 - **Who paid**: clients ranked by what they paid, for all time or for one year.
 - **Each client**: all their invoices and services, plus a ready-to-send payment
   reminder listing their open invoices and the total due, with a Copy button.
+- **Part payments**: on a client's page, click **Record payment** under an open invoice, type
+  the amount received (it can be less than the invoice), the date and an optional note such as
+  "Zelle", and click **Save payment**. The rest stays owed everywhere in the app, and your
+  payments are kept when you import a new export. If you later record the same payment in
+  TaxDome too, delete it in Fees Tracker so it isn't counted twice.
 - **Bad debts**: on a client's page, click **Mark as bad debt** next to an invoice that will
   never be paid. It is then left out of "owed" everywhere and shown on its own, in the
   summary, the year-by-year table and the Bad debts page. Click **Undo bad debt** to bring
@@ -64,6 +69,7 @@ Do this again whenever you want fresh numbers.
 - **Collected** counts card and bank payments that went through in TaxDome (failed or
   pending ones don't count), plus payments recorded on the invoice as a line such as
   "Payment Received on 5/9/2026", which is how Zelle, cash and cheque payments are entered.
+- Payments you record in Fees Tracker are added to what TaxDome says was collected.
 - **Still owed** is billed minus collected, for invoices that are not marked paid.
   An invoice marked paid in TaxDome always counts as owing nothing.
 - **Bad debt** is what was still owed on invoices you marked as bad debt. If a client
