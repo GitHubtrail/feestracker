@@ -14,16 +14,16 @@ import webbrowser
 from datetime import date
 from pathlib import Path
 
-from . import db, reports
+from . import db, reports, storage
 from .taxdome import ImportError_, format_cents, read_invoices
 
-DEFAULT_DB = Path(__file__).resolve().parent.parent / "data" / "feestracker.db"
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="feestracker", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="where to keep the data")
+    parser.add_argument("--db", type=Path, default=None,
+                        help="where to keep the data (default: Documents/Fees Tracker)")
     sub = parser.add_subparsers(dest="command")
     p_serve = sub.add_parser("serve", help="open the app in your browser (the default)")
     p_serve.add_argument("--port", type=int, default=8765)
@@ -32,6 +32,12 @@ def main(argv: list[str] | None = None) -> int:
     p_import.add_argument("csv", type=Path)
     sub.add_parser("summary", help="print totals")
     args = parser.parse_args(argv)
+    if args.db is None:
+        args.db = storage.default_db()
+        moved = storage.move_old_data(args.db)
+        if moved:
+            print(f"Moved your data from {moved.path.parent.parent} to {args.db.parent}.")
+            print("From now on it is kept there, so new versions of the app find it.")
     args.db.parent.mkdir(parents=True, exist_ok=True)
 
     if args.command == "import":
@@ -71,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     server = serve(args.db, port=port)
     url = f"http://127.0.0.1:{port}/"
     print(f"Fees Tracker is running at {url}")
+    print(f"Your data is kept in {args.db.parent}")
     print("Keep this window open while you use it. Press Ctrl+C to stop.")
     if not getattr(args, "no_browser", False):
         threading.Timer(0.5, webbrowser.open, (url,)).start()
