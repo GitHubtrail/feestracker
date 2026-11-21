@@ -75,7 +75,7 @@ fieldset label { margin-right:14px; white-space:nowrap }
 .stack > * { margin:0 0 10px }
 """
 
-# The years Sarita asked to follow up on first.
+# The years asked to follow up on first.
 DEFAULT_UNPAID_YEARS = ("2023", "2024")
 
 NAV = [

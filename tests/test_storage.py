@@ -129,3 +129,15 @@ def test_data_page_brings_back_changes(home):
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_update_explains_a_private_repo(tmp_path):
+    import urllib.error
+    import pytest
+    from feestracker import storage
+
+    def fetch(url):
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+    with pytest.raises(storage.UpdateError, match="private"):
+        storage.update_app(tmp_path, fetch=fetch)
