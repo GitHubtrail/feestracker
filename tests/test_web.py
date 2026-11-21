@@ -170,6 +170,9 @@ def test_record_part_payment(server):
     assert "Invoice 1003 dated 2022-05-10: $400.00" in client  # the rest is still owed
     assert "Total due: $550.00" in client
     assert "$1,356.00" in get(server + "/")  # owed now, was $1,556.00
+    assert "$200.00 you entered here" in get(server + "/")
+    entered = get(server + "/entered")
+    assert "Rivera Maria" in entered and "1003" in entered and "Zelle" in entered and "1 payment" in entered
 
     status, _ = post_form(server, "/payment", {
         "action": "add", "number": "1003", "amount": "lots", "paid_on": "2026-11-15", "back": back})

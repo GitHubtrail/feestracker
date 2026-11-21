@@ -175,7 +175,8 @@ def home(conn: sqlite3.Connection, today: date) -> bytes:
         <div class=big>{money(s.billed_cents)}</div>
         <div class="small muted">{s.invoices} invoices</div></div>
       <div class=card><div class=label>Collected</div>
-        <div class="big ok">{money(s.collected_cents)}</div></div>
+        <div class="big ok">{money(s.collected_cents)}</div>
+        {entered_note(conn)}</div>
       <div class=card><div class=label>Owed to you now</div>
         <div class="big owe">{money(s.outstanding_cents)}</div>
         <div class="small muted">{s.open_invoices} invoices · {s.clients_owing} clients</div></div>
@@ -281,6 +282,42 @@ def paid(conn: sqlite3.Connection, year: str) -> bytes:
       <tfoot><tr><td>Total ({len(rows_data)} clients)</td><td class='n ok'>{money(total)}</td>
       <td></td><td></td></tr></tfoot></table></div>"""
     return page("Who paid", body, "/paid")
+
+
+def entered_payments(conn: sqlite3.Connection) -> list[dict]:
+    """Payments typed into Fees Tracker (not in TaxDome), newest first."""
+    return [dict(r) for r in conn.execute(
+        """SELECT m.id, m.invoice_number, m.paid_on, m.amount_cents, m.note, m.entered_at, v.client
+           FROM manual_payments m JOIN invoice_view v ON v.number = m.invoice_number
+           ORDER BY m.entered_at DESC, m.id DESC""")]
+
+
+def entered_note(conn: sqlite3.Connection) -> str:
+    rows = entered_payments(conn)
+    if not rows:
+        return ""
+    return (f"<div class='small muted'>includes <a href='/entered'>{money(sum(r['amount_cents'] for r in rows))} "
+            f"you entered here</a></div>")
+
+
+def entered_page(conn: sqlite3.Connection) -> bytes:
+    rows = entered_payments(conn)
+    body_rows = "".join(
+        f"<tr><td>{client_link(r['client'])}</td><td>{escape(r['invoice_number'])}</td>"
+        f"<td class='n ok'>{money(r['amount_cents'])}</td><td>{escape(r['paid_on'])}</td>"
+        f"<td class=muted>{escape(r['entered_at'][:16].replace('T', ' '))}</td>"
+        f"<td class='small muted'>{escape(r['note'])}</td></tr>"
+        for r in rows)
+    body = f"""<h1>Payments you entered</h1>
+    <p class=muted>Payments recorded in Fees Tracker with Record payment or the tick boxes. They are
+      not in TaxDome, so TaxDome's own totals don't include them. To undo one, open the client.</p>
+    <div class=wrap><table><thead><tr><th>Client</th><th>Invoice</th><th class=n>Amount</th>
+      <th>Paid on</th><th>Entered</th><th>Note</th></tr></thead>
+      <tbody>{body_rows or '<tr><td colspan=6 class=muted>No payments entered yet.</td></tr>'}</tbody>
+      <tfoot><tr><td>Total ({count(len(rows), 'payment')})</td><td></td>
+      <td class='n ok'>{money(sum(r['amount_cents'] for r in rows))}</td><td colspan=3></td></tr></tfoot>
+    </table></div>"""
+    return page("Payments you entered", body, "/paid")
 
 
 def tick(name: str) -> str:
@@ -874,6 +911,8 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                     self._send(unpaid_csv(conn, multi.get("year", [])), "text/csv; charset=utf-8",
                                extra={"Content-Disposition":
                                       f'attachment; filename="unpaid-{today.isoformat()}.csv"'})
+                elif url.path == "/entered":
+                    self._send(entered_page(conn))
                 elif url.path == "/paid":
                     self._send(paid(conn, year))
                 elif url.path == "/clients":
