@@ -216,10 +216,17 @@ def update_app(app_dir: Path = APP_DIR, url: str = UPDATE_URL, fetch=None) -> No
                 shutil.copytree(src, staged, ignore=shutil.ignore_patterns("__pycache__"))
                 old = app_dir / (name + ".old")
                 shutil.rmtree(old, ignore_errors=True)
-                if dst.exists():
-                    dst.rename(old)
-                staged.rename(dst)
+                try:
+                    if dst.exists():
+                        dst.rename(old)
+                    staged.rename(dst)
+                except OSError:
+                    # Windows can refuse to rename a folder that is in use: copy over it instead.
+                    if old.exists() and not dst.exists():
+                        old.rename(dst)
+                    shutil.copytree(staged, dst, dirs_exist_ok=True)
                 shutil.rmtree(old, ignore_errors=True)
+                shutil.rmtree(staged, ignore_errors=True)
             elif not dst.exists() or dst.read_bytes() != src.read_bytes():
                 # Windows reads a running .bat file as it goes, so only replace changed files.
                 shutil.copy2(src, dst)

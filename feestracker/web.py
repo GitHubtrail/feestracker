@@ -9,7 +9,9 @@ import csv
 import email.parser
 import email.policy
 import io
+import os
 import re
+import socket
 import sqlite3
 from datetime import date
 from html import escape
@@ -18,8 +20,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
-from . import db, reports, storage
-from .clientlists import ListError, names_from_text, read_names
+from . import __version__, db, reports, storage
+from .clientlists import ListError, looks_like_client_list, names_from_text, read_names
 from .taxdome import ImportError_, format_cents, read_invoices
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -80,10 +82,10 @@ NAV = [
     ("/", "Summary"),
     ("/owes", "Who owes"),
     ("/unpaid", "Unpaid by year"),
+    ("/not-billed", "Not billed"),
     ("/paid", "Who paid"),
     ("/clients", "All clients"),
     ("/import", "Import"),
-    ("/not-billed", "Not billed"),
     ("/bad-debts", "Bad debts"),
     ("/checks", "Data checks"),
     ("/data", "Your data & updates"),
@@ -108,7 +110,8 @@ def page(title: str, body: str, active: str = "") -> bytes:
         '<meta name=viewport content="width=device-width,initial-scale=1">'
         f"<title>{escape(title)} · Fees Tracker</title><style>{STYLE}</style></head>"
         f"<body><header><nav><b>Fees Tracker</b>{links}</nav></header>"
-        f"<main>{body}</main></body></html>"
+        f"<main>{body}<p class='small muted' style='margin-top:40px'>Fees Tracker version {__version__}</p>"
+        "</main></body></html>"
     ).encode("utf-8")
 
 
@@ -722,6 +725,34 @@ def not_billed_csv(conn: sqlite3.Connection, year: str) -> bytes:
     return out.getvalue().encode("utf-8-sig")
 
 
+def guess_tax_year(filename: str, today: date) -> str:
+    """The tax year in a file name such as "Clients 2024.csv", else last year."""
+    found = [y for y in re.findall(r"(?<!\d)(20\d\d)(?!\d)", filename) if y in tax_year_options(today)]
+    return found[-1] if found else str(today.year - 1)
+
+
+def client_list_found(filename: str, names: list[str], today: date) -> bytes:
+    """Import was given a client list: offer to save it as a tax year's client list."""
+    year = guess_tax_year(filename, today)
+    options = "".join(f"<option{' selected' if y == year else ''}>{y}</option>"
+                      for y in tax_year_options(today))
+    body = f"""<h1>This is a client list</h1>
+    <div class=note>{escape(filename) or 'This file'} is a client list from your tax software, not a
+      TaxDome bills export, so it was not imported as bills. Your invoices were not changed.</div>
+    <p>It has {count(len(names), 'client')}. Save it as the client list for a tax year to see who wasn't
+      billed. Saving it never changes your clients, invoices, payments or bad debts, and only replaces
+      that year's list.</p>
+    <form method=post action="/not-billed" enctype="multipart/form-data" class="payform">
+      <textarea name=names hidden>{escape(chr(10).join(names))}</textarea>
+      <input type=hidden name=source value="{escape(filename)}">
+      <p><label>Tax year <select name=year>{options}</select></label>
+        <button>Save as client list</button></p>
+    </form>
+    <p class="small muted">Only client names are kept. To load your bills, export them in TaxDome from
+      Billing → Invoices and <a href="/import">import that file</a>.</p>"""
+    return page("Client list", body, "/not-billed")
+
+
 def import_page(message: str = "") -> bytes:
     body = f"""<h1>Import from TaxDome</h1>
     {message}
@@ -903,11 +934,20 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                 self._send(import_page("<div class='note owe'>That file is too big.</div>"),
                            status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
                 return
-            data = read_upload(self.headers.get("Content-Type", ""), self.rfile.read(length))
+            filename, data = read_form(self.headers.get("Content-Type", ""),
+                                       self.rfile.read(length)).get("file", ("", b""))
             if not data:
                 self._send(import_page("<div class='note owe'>Please choose a CSV file.</div>"),
                            status=HTTPStatus.BAD_REQUEST)
                 return
+            if looks_like_client_list(data, filename):
+                # A client list sent to Import by mistake: offer to save it as one instead.
+                # Nothing is saved until the tax year is chosen, and bills are never touched.
+                try:
+                    self._send(client_list_found(filename, read_names(data, filename), today_fn()))
+                    return
+                except ListError:
+                    pass
             conn = db.connect(db_path)
             try:
                 text = data.decode("utf-8-sig", errors="replace")
@@ -981,7 +1021,8 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                     if data:
                         names, source = read_names(data, filename), filename
                     elif pasted.strip():
-                        names, source = names_from_text(pasted), "pasted names"
+                        source = form.get("source", ("", b""))[1].decode("utf-8", "replace").strip()
+                        names, source = names_from_text(pasted), source or "pasted names"
                     else:
                         return reply("Please choose a file or paste some names.", False,
                                      status=HTTPStatus.BAD_REQUEST)
@@ -1064,6 +1105,26 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
     return Handler
 
 
+class _Server(ThreadingHTTPServer):
+    # On Windows, address reuse lets a second copy share a port that an older copy,
+    # still running, keeps answering on. Never share: take a free port instead.
+    allow_reuse_address = os.name != "nt"
+
+
+def _in_use(host: str, port: int) -> bool:
+    with socket.socket() as s:
+        s.settimeout(0.3)
+        return s.connect_ex((host, port)) == 0
+
+
 def serve(db_path: Path, host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
+    """Start the app on `port`, or on the next free port if another copy is already running."""
     db.connect(db_path).close()
-    return ThreadingHTTPServer((host, port), make_handler(db_path))
+    for p in range(port, port + 20):
+        if _in_use(host, p):
+            continue
+        try:
+            return _Server((host, p), make_handler(db_path))
+        except OSError:
+            continue
+    return _Server((host, 0), make_handler(db_path))

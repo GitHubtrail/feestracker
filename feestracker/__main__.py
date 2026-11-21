@@ -14,7 +14,7 @@ import webbrowser
 from datetime import date
 from pathlib import Path
 
-from . import db, reports, storage
+from . import __version__, db, reports, storage
 from .taxdome import ImportError_, format_cents, read_invoices
 
 
@@ -78,10 +78,9 @@ def main(argv: list[str] | None = None) -> int:
 
     from .web import serve
 
-    port = getattr(args, "port", 8765)
-    server = serve(args.db, port=port)
-    url = f"http://127.0.0.1:{port}/"
-    print(f"Fees Tracker is running at {url}")
+    server = serve(args.db, port=getattr(args, "port", 8765))
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    print(f"Fees Tracker {__version__} is running at {url}")
     print(f"Your data is kept in {args.db.parent}")
     print("Keep this window open while you use it. Press Ctrl+C to stop.")
     if not getattr(args, "no_browser", False):

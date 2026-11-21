@@ -71,7 +71,7 @@ def test_upload_then_browse(server):
 
 
 def test_upload_wrong_file(server):
-    status, html = upload(server, b"Name,Amount\nBob,1\n")
+    status, html = upload(server, b"Ref,Amount\nB1,1\n")
     assert status == 400 and "Missing columns" in html
 
 
@@ -322,3 +322,42 @@ def test_remove_clients_in_one_go_and_put_back(server, tmp_path):
     assert "Removed clients" not in get(server + "/clients")
     assert conn.execute("SELECT SUM(total_cents) FROM invoice_view").fetchone()[0] == billed_before
     conn.close()
+
+
+def test_client_list_sent_to_import_is_offered_as_a_client_list(server, tmp_path):
+    upload(server, FIXTURE.read_bytes())
+    conn = db.connect(tmp_path / "web.db")
+    before = conn.execute("SELECT COUNT(*), SUM(total_cents) FROM invoices").fetchone()[:]
+    status, html = upload(server, RETURN_LIST, "Clients 2024.csv")
+    assert status == 200 and "This is a client list" in html and "3 clients" in html
+    assert "<option selected>2024</option>" in html
+    assert "123-45-6789" not in html and "98-7654321" not in html
+    assert conn.execute("SELECT COUNT(*), SUM(total_cents) FROM invoices").fetchone()[:] == before
+    assert db.client_lists(conn) == []  # nothing saved until the year is chosen
+    conn.close()
+
+
+def test_guess_tax_year():
+    assert web.guess_tax_year("Clients 2023.csv", TODAY) == "2023"
+    assert web.guess_tax_year("clients-ATX.csv", TODAY) == str(TODAY.year - 1)
+
+
+def test_other_files_still_get_the_bills_error(server):
+    status, html = upload(server, b"Foo,Bar\n1,2\n", "x.csv")
+    assert status == 400 and "Missing columns" in html
+
+
+def test_second_copy_takes_a_free_port_and_shows_its_version(tmp_path):
+    from feestracker import __version__
+    first = web.serve(tmp_path / "a.db", port=0)
+    port = first.server_address[1]
+    threading.Thread(target=first.serve_forever, daemon=True).start()
+    second = web.serve(tmp_path / "b.db", port=port)
+    try:
+        assert second.server_address[1] != port
+        threading.Thread(target=second.serve_forever, daemon=True).start()
+        assert f"version {__version__}" in get(f"http://127.0.0.1:{second.server_address[1]}/")
+    finally:
+        for s in (first, second):
+            s.shutdown()
+            s.server_close()

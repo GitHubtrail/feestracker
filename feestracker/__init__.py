@@ -1,3 +1,5 @@
 """Fees Tracker: see who owes, who paid, and what is outstanding each year."""
 
-__version__ = "0.1.0"
+# Change with every release, so the version at the bottom of each page shows
+# whether an update arrived.
+__version__ = "2026-11-21b"
