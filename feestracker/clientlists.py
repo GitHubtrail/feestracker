@@ -55,6 +55,23 @@ def read_names(data: bytes, filename: str = "") -> list[str]:
     return names_from_rows(rows)
 
 
+def looks_like_client_list(data: bytes, filename: str = "") -> bool:
+    """Whether a file is a client list (for example a tax software return list)
+    rather than a TaxDome bills export: it has name columns and no invoice column."""
+    try:
+        if data[:2] == b"PK" or filename.lower().endswith((".xlsx", ".xlsm")):
+            rows = _xlsx_rows(data)
+        else:
+            rows = list(csv.reader(io.StringIO(data.decode("utf-8-sig", errors="replace"))))
+    except (ListError, csv.Error, ValueError):
+        return False
+    header = next(([c.strip().lower() for c in r] for r in rows if any(c.strip() for c in r)), [])
+    if any("invoice" in h for h in header):
+        return False
+    return ("return name" in header or any(h in NAME_HEADERS for h in header)
+            or ("first name" in header and "last name" in header))
+
+
 def names_from_text(text: str) -> list[str]:
     """Names pasted into a box, one per line (a pasted spreadsheet column works too)."""
     return names_from_rows(_text_rows(text))
