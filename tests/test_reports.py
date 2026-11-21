@@ -8,8 +8,12 @@ def test_summary(conn):
     s = reports.summary(conn)
     assert s.invoices == 6
     assert s.billed_cents == 351100
-    assert s.collected_cents == 205500
+    # $2,055.00 was paid, $100.00 of it above an invoice's amount, which is kept apart
+    # so the totals add up.
+    assert s.collected_cents == 195500
+    assert s.overpaid_cents == 10000 and s.overpaid_invoices == 1
     assert s.outstanding_cents == 155600
+    assert s.billed_cents == s.collected_cents + s.outstanding_cents + s.written_off_cents
     assert s.open_invoices == 3
     assert s.clients_owing == 2
     assert s.last_import
@@ -22,6 +26,8 @@ def test_by_year(conn):
         105600, 10000, 95600,
     )
     assert rows["2022"]["outstanding"] == 60000
+    for r in rows.values():
+        assert r["billed"] == r["collected"] + r["outstanding"] + r["written_off"]
     assert rows["2025"]["outstanding"] == 0
 
 
@@ -113,3 +119,13 @@ def test_unpaid_by_years(conn):
     rows = reports.unpaid_by_years(conn, ["2022", "2025"])
     assert [r["client"] for r in rows] == ["Rivera Maria"]  # Chen's 2025 invoice owes nothing
     assert rows[0]["by_year"] == {"2022": 60000, "2025": 0}
+
+
+def test_totals_add_up_with_bad_debts_and_part_payments(conn):
+    db.mark_bad_debt(conn, "1003")
+    db.add_payment(conn, "1004", 5000, "2026-11-15")
+    db.add_payment(conn, "1002", 999999, "2026-11-15")  # more than is owed
+    s = reports.summary(conn)
+    assert s.billed_cents == s.collected_cents + s.outstanding_cents + s.written_off_cents
+    for r in reports.by_year(conn):
+        assert r["billed"] == r["collected"] + r["outstanding"] + r["written_off"]

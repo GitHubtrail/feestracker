@@ -99,6 +99,11 @@ WITH m AS (SELECT invoice_number, SUM(amount_cents) AS cents, MAX(paid_on) AS la
        LEFT JOIN m ON m.invoice_number = i.number
        LEFT JOIN bad_debts b ON b.invoice_number = i.number)
 SELECT v.*,
+       -- What was paid toward the invoice itself, so billed always equals
+       -- collected + owed + written off. Anything paid above the invoice amount
+       -- (one payment covering several invoices, a fee) is kept apart.
+       total_cents - balance_cents AS collected_cents,
+       paid_cents - (total_cents - balance_cents) AS overpaid_cents,
        CASE WHEN bad_debt THEN 0 ELSE balance_cents END AS owed_cents,
        CASE WHEN bad_debt THEN balance_cents ELSE 0 END AS written_off_cents
 FROM v;

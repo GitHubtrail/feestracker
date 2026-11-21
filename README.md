@@ -63,6 +63,11 @@ Do this again whenever you want fresh numbers.
   An invoice marked paid in TaxDome always counts as owing nothing.
 - **Bad debt** is what was still owed on invoices you marked as bad debt. If a client
   pays one later, only what is left unpaid counts as written off.
+- On the Summary, **billed = collected + owed + bad debt**, overall and for each year.
+  Collected there counts what was paid toward each invoice, up to its amount. Money paid
+  above an invoice's amount (for example one payment that covered several invoices) is
+  shown on its own line as "paid above invoice", and those invoices are listed on Data checks.
+  Who paid and each client's page still show everything the client actually paid.
 - **Age** is counted from the invoice date.
 - The **year** on the summary and on Who owes is the invoice's year. On Who paid it is the
   year the invoice was paid.
