@@ -83,3 +83,14 @@ def test_bad_money_names_the_row():
     text = "Invoice,Status,Client Account Name,Service title #1,Service amount #1\n7,paid,X,Fee,lots\n"
     with pytest.raises(ImportError_, match="Row 2 \\(invoice 7\\)"):
         list(read_invoices(io.StringIO(text)))
+
+
+def test_offline_payment_wording_and_typos():
+    from feestracker.taxdome import OFFLINE_PAYMENT
+    for title in ["Payment Received on 5/9/2026", "pay received on 1/2/2024", "Payment rcd 6/3/2024 (Zelle)",
+                  "Received on 3/28/2024", "Paid earlier 50%", "Fees recd 50%", "Initial consulting fee received",
+                  "Panyment made on 11/19/2026", "Paymnt received"]:
+        assert OFFLINE_PAYMENT.search(title), title
+    for title in ["Discount", "Payable later by 12/6/2023", "Due later 50%", "Write off", "Moved to new invoice",
+                  "Credit from 2021 invoice", "PTAC Fees Discount", "Additional state payroll PA TY 2021"]:
+        assert not OFFLINE_PAYMENT.search(title), title

@@ -28,7 +28,9 @@ SUCCEEDED = "succeeded"
 # negative "discount" line such as "Payment Received on 5/9/2026". Those count
 # as money collected, not as a discount.
 OFFLINE_PAYMENT = re.compile(
-    r"pa[yi]ment\s+(rec|made)|received\s+payment|amount\s+received|cash\s+received|paid\s+by",
+    # Typos are common ("Panyment made", "Paymnt received"), so allow a few odd letters.
+    r"\bpa\w{0,4}m\w*nt\s+(rec|made)|\bpay\s+rec|received\s+(payment|on)"
+    r"|\b(fees?|amount|cash)\s+rec|\brc?v?d\b|\brecd\b|\bpaid\s+(by|earlier)",
     re.IGNORECASE,
 )
 

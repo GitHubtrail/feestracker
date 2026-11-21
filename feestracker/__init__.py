@@ -2,4 +2,4 @@
 
 # Change with every release, so the version at the bottom of each page shows
 # whether an update arrived.
-__version__ = "2026-11-21b"
+__version__ = "2026-11-21c"
