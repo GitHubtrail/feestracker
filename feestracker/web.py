@@ -19,7 +19,6 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import db, reports
-from .clientlists import ListError, names_from_text, read_names
 from .taxdome import ImportError_, format_cents, read_invoices
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -80,7 +79,6 @@ NAV = [
     ("/unpaid", "Unpaid by year"),
     ("/paid", "Who paid"),
     ("/clients", "All clients"),
-    ("/lists", "Client lists"),
     ("/import", "Import"),
     ("/bad-debts", "Bad debts"),
     ("/checks", "Data checks"),
@@ -504,185 +502,6 @@ def unpaid_csv(conn: sqlite3.Connection, chosen: list[str]) -> bytes:
     return out.getvalue().encode("utf-8-sig")
 
 
-def list_year_options(today: date) -> list[str]:
-    return [str(y) for y in range(today.year, today.year - 8, -1)]
-
-
-def compare_defaults(saved: list[str], from_years: list[str], to_year: str) -> tuple[list[str], str]:
-    """Compare the newest list against the others unless the person chose otherwise."""
-    if not to_year or to_year not in saved:
-        to_year = saved[0] if saved else ""
-    from_years = [y for y in from_years if y in saved and y != to_year] or [
-        y for y in saved if y < to_year]
-    return sorted(from_years), to_year
-
-
-def lists_page(conn: sqlite3.Connection, today: date, from_years: list[str], to_year: str,
-               message: str = "") -> bytes:
-    saved = db.client_lists(conn)
-    saved_years = [l["year"] for l in saved]
-    options = "".join(
-        f"<option{' selected' if y == str(today.year - 1) else ''}>{y}</option>"
-        for y in list_year_options(today)
-    )
-    saved_rows = "".join(
-        f"<tr><td><b>{escape(l['year'])}</b></td>"
-        f"<td class=n><a href='/lists/view?year={quote(l['year'])}'>{count(l['names'], 'client')}</a></td>"
-        f"<td class='small muted'>{escape(l['source'])}</td>"
-        f"<td class='small muted'>{escape(l['uploaded_at'].replace('T', ' ')[:16])}</td>"
-        f"<td><form class=act method=post action='/lists/delete' "
-        f"onsubmit=\"return confirm('Remove the {escape(l['year'])} list?')\">"
-        f"<input type=hidden name=year value='{escape(l['year'])}'><button>Remove</button></form></td></tr>"
-        for l in saved
-    )
-    upload = f"""<h2>Add a list</h2>
-    <form method=post action="/lists" enctype="multipart/form-data" class=stack>
-      <div><label>Year <select name=year>{options}</select></label></div>
-      <div><label>Spreadsheet (Excel .xlsx or CSV): <input type=file name=file
-        accept=".csv,.xlsx,.xlsm,.txt,text/csv"></label></div>
-      <div><label>or paste names, one per line:<br>
-        <textarea name=names rows=4 placeholder="Rivera Maria&#10;Acme Bakery LLC"></textarea></label></div>
-      <div><button>Save list</button>
-        <span class="small muted">Saving a list for a year that already has one replaces it.</span></div>
-    </form>"""
-    compare = ""
-    if len(saved_years) >= 2:
-        chosen, target = compare_defaults(saved_years, from_years, to_year)
-        compare = compare_section(conn, saved_years, chosen, target)
-    elif saved_years:
-        compare = ("<div class=note>Add at least one more year's list to see who is missing. "
-                   "For example, add your 2023, 2024 and 2025 lists.</div>")
-    body = f"""<h1>Client lists</h1>
-    {message}
-    <p class=muted>Upload your client list for each year to see which clients from earlier years
-      are not on a later year's list, and whether they still owe you. The file just needs a column of
-      client names (a column called Name or Client works best). Names are matched even if they are
-      written differently, such as “Shah, Pinky” and “Pinky Shah”.</p>
-    {compare}
-    {'<h2>Your lists</h2><div class=wrap><table><thead><tr><th>Year</th><th class=n>Clients</th><th>File</th><th>Added</th><th></th></tr></thead><tbody>' + saved_rows + '</tbody></table></div>' if saved else ''}
-    {upload}"""
-    return page("Client lists", body, "/lists")
-
-
-def compare_section(conn: sqlite3.Connection, saved_years: list[str], chosen: list[str],
-                    target: str) -> str:
-    result = reports.missing_from_list(conn, chosen, target)
-    targets = "".join(f"<option{' selected' if y == target else ''}>{escape(y)}</option>"
-                      for y in saved_years)
-    earlier = " and ".join(chosen) or "earlier"
-
-    def row(e: dict, check: bool) -> str:
-        who = taxdome_cell(e)
-        close = (f"<td>{escape(e['close_name'])}</td>" if check else "")
-        return (
-            f"<tr><td>{who}</td><td>{escape(', '.join(e['years']))}</td>{close}"
-            f"<td class='n {'owe' if e['owed'] else 'muted'}'>{money(e['owed'])}</td>"
-            f"<td class=muted>{escape(e['last_invoice'][:10]) or '–'}</td>"
-            f"<td class=muted>{escape(e['last_paid'][:10]) or '–'}</td></tr>"
-        )
-
-    heads = "<th class=n>Owes now</th><th>Last invoice</th><th>Last payment</th>"
-    missing_rows = "".join(row(e, False) for e in result["missing"])
-    check_rows = "".join(row(e, True) for e in result["check"])
-    query = "&".join([f"from={quote(y)}" for y in chosen] + [f"to={quote(target)}"])
-    check_table = ""
-    if result["check"]:
-        check_table = f"""<h2>Check these: a similar name is on the {escape(target)} list</h2>
-        <p class="small muted">These may be the same client spelled differently, or a different client
-          with a similar name.</p>
-        <div class=wrap><table><thead><tr><th>Client</th><th>On lists</th><th>Similar name on {escape(target)} list</th>
-          {heads}</tr></thead><tbody>{check_rows}</tbody></table></div>"""
-    return f"""<h2>Who is missing from the {escape(target)} list?</h2>
-    <form method=get action="/lists"><fieldset>
-      <legend>Clients on these lists</legend>{year_checkboxes('from', saved_years, chosen)}
-      <label>who are not on the <select name=to>{targets}</select> list</label>
-      <button>Compare</button></fieldset></form>
-    <div class=cards>
-      <div class=card><div class=label>Not on the {escape(target)} list</div>
-        <div class="big owe">{len(result['missing'])}</div>
-        <div class="small muted">of {count(result['total'], 'client')} on the {escape(earlier)} lists</div></div>
-      <div class=card><div class=label>Similar name, worth a check</div>
-        <div class="big warn">{len(result['check'])}</div></div>
-      <div class=card><div class=label>Also on the {escape(target)} list</div>
-        <div class="big ok">{result['found']}</div></div>
-    </div>
-    <h2>Not on the {escape(target)} list</h2>
-    <p class="small muted">Clients who still owe come first, then clients with no invoices in TaxDome
-      at all. “Owes now”, “Last invoice” and “Last payment” come from TaxDome, so you can see if
-      they were billed and if they paid.
-      <a href="/lists/missing.csv?{query}">Download this list (CSV)</a></p>
-    <div class=wrap><table><thead><tr><th>Client</th><th>On lists</th>{heads}</tr></thead>
-      <tbody>{missing_rows or '<tr><td colspan=5 class=muted>Everyone is on the list.</td></tr>'}</tbody></table></div>
-    {check_table}"""
-
-
-def missing_csv(conn: sqlite3.Connection, from_years: list[str], to_year: str) -> bytes:
-    saved = [l["year"] for l in db.client_lists(conn)]
-    chosen, target = compare_defaults(saved, from_years, to_year)
-    result = reports.missing_from_list(conn, chosen, target)
-    out = io.StringIO()
-    w = csv.writer(out)
-    w.writerow(["Client", "On lists", f"Similar name on {target} list", "TaxDome client",
-                "Owes now", "Last invoice", "Last payment"])
-    for e in result["missing"] + result["check"]:
-        w.writerow([e["name"], ", ".join(e["years"]), e["close_name"] or "",
-                    e["taxdome"] or e["taxdome_maybe"] or "", f"{e['owed'] / 100:.2f}",
-                    e["last_invoice"][:10], e["last_paid"][:10]])
-    return out.getvalue().encode("utf-8-sig")
-
-
-def taxdome_cell(e: dict) -> str:
-    """The client's name, and how it appears in TaxDome."""
-    if e["taxdome"]:
-        if e["taxdome"].lower() == e["name"].lower():
-            return client_link(e["taxdome"])
-        return f"{escape(e['name'])}<div class='small muted'>In TaxDome as {client_link(e['taxdome'])}</div>"
-    if e["taxdome_maybe"]:
-        return (f"{escape(e['name'])}<div class='small warn'>Not sure: maybe "
-                f"{client_link(e['taxdome_maybe'])} in TaxDome</div>")
-    return f"{escape(e['name'])}<div class='small owe'>No invoices in TaxDome</div>"
-
-
-def list_view(conn: sqlite3.Connection, year: str) -> bytes:
-    entries = reports.client_list(conn, year)
-    if not entries:
-        return page("Client list", "<h1>No list for that year</h1><p><a href='/lists'>Client lists</a></p>")
-    owing = [e for e in entries if e["owed"] > 0]
-    not_billed = [e for e in entries if not e["taxdome"] and not e["taxdome_maybe"]]
-    unsure = [e for e in entries if not e["taxdome"] and e["taxdome_maybe"]]
-    rows = "".join(
-        f"<tr><td>{taxdome_cell(e)}</td>"
-        f"<td class='n {'owe' if e['owed'] else 'muted'}'>{money(e['owed'])}</td>"
-        f"<td class=muted>{escape(e['last_invoice'][:10]) or '–'}</td>"
-        f"<td class=muted>{escape(e['last_paid'][:10]) or '–'}</td></tr>"
-        for e in entries
-    )
-    body = f"""<p class=small><a href="/lists">← Client lists</a></p>
-    <h1>{escape(year)} client list</h1>
-    <div class=cards>
-      <div class=card><div class=label>Clients on the list</div><div class=big>{len(entries)}</div></div>
-      <div class=card><div class=label>Still owe you</div><div class="big owe">{len(owing)}</div>
-        <div class="small muted">{money(sum(e['owed'] for e in owing))}</div></div>
-      <div class=card><div class=label>No invoices in TaxDome</div><div class="big warn">{len(not_billed)}</div>
-        <div class="small muted">maybe never billed, or billed under another name</div></div>
-      <div class=card><div class=label>Not sure of the TaxDome name</div><div class="big muted">{len(unsure)}</div></div>
-    </div>
-    <p class="small muted">Clients who owe come first, then clients with no invoices in TaxDome.
-      <a href="/lists/view.csv?year={quote(year)}">Download this list (CSV)</a></p>
-    <div class=wrap><table><thead><tr><th>Client</th><th class=n>Owes now</th>
-      <th>Last invoice</th><th>Last payment</th></tr></thead><tbody>{rows}</tbody></table></div>"""
-    return page(f"{year} client list", body, "/lists")
-
-
-def list_view_csv(conn: sqlite3.Connection, year: str) -> bytes:
-    out = io.StringIO()
-    w = csv.writer(out)
-    w.writerow(["Client", "TaxDome client", "Owes now", "Last invoice", "Last payment"])
-    for e in reports.client_list(conn, year):
-        td = e["taxdome"] or (f"maybe {e['taxdome_maybe']}" if e["taxdome_maybe"] else "no invoices")
-        w.writerow([e["name"], td, f"{e['owed'] / 100:.2f}", e["last_invoice"][:10], e["last_paid"][:10]])
-    return out.getvalue().encode("utf-8-sig")
-
 
 def import_page(message: str = "") -> bytes:
     body = f"""<h1>Import from TaxDome</h1>
@@ -717,24 +536,17 @@ def checks(conn: sqlite3.Connection) -> bytes:
 # ---------------------------------------------------------------- server
 
 
-def read_form(content_type: str, body: bytes) -> dict[str, tuple[str, bytes]]:
-    """The fields of a multipart form body, as {name: (filename, bytes)}."""
+def read_upload(content_type: str, body: bytes) -> bytes | None:
+    """Return the bytes of the 'file' field from a multipart form body."""
     msg = email.parser.BytesParser(policy=email.policy.HTTP).parsebytes(
         b"Content-Type: " + content_type.encode("latin-1") + b"\r\n\r\n" + body
     )
     if not msg.is_multipart():
-        return {}
-    fields = {}
+        return None
     for part in msg.iter_parts():
-        name = part.get_param("name", header="content-disposition")
-        if name:
-            fields[name] = (part.get_filename() or "", part.get_payload(decode=True) or b"")
-    return fields
-
-
-def read_upload(content_type: str, body: bytes) -> bytes | None:
-    """Return the bytes of the 'file' field from a multipart form body."""
-    return read_form(content_type, body).get("file", ("", None))[1] or None
+        if part.get_param("name", header="content-disposition") == "file":
+            return part.get_payload(decode=True)
+    return None
 
 
 def parse_amount(text: str) -> int | None:
@@ -786,19 +598,6 @@ def make_handler(db_path: Path, today_fn=date.today):
                     self._send(unpaid_csv(conn, multi.get("year", [])), "text/csv; charset=utf-8",
                                extra={"Content-Disposition":
                                       f'attachment; filename="unpaid-{today.isoformat()}.csv"'})
-                elif url.path == "/lists":
-                    self._send(lists_page(conn, today, multi.get("from", []), q.get("to", "")))
-                elif url.path == "/lists/view":
-                    self._send(list_view(conn, q.get("year", "")))
-                elif url.path == "/lists/view.csv":
-                    self._send(list_view_csv(conn, q.get("year", "")), "text/csv; charset=utf-8",
-                               extra={"Content-Disposition":
-                                      f'attachment; filename="client-list-{quote(q.get("year", ""))}.csv"'})
-                elif url.path == "/lists/missing.csv":
-                    self._send(missing_csv(conn, multi.get("from", []), q.get("to", "")),
-                               "text/csv; charset=utf-8",
-                               extra={"Content-Disposition":
-                                      f'attachment; filename="missing-clients-{today.isoformat()}.csv"'})
                 elif url.path == "/paid":
                     self._send(paid(conn, year))
                 elif url.path == "/clients":
@@ -833,12 +632,6 @@ def make_handler(db_path: Path, today_fn=date.today):
                 return
             if path == "/payment":
                 self._payment()
-                return
-            if path == "/lists":
-                self._save_list()
-                return
-            if path == "/lists/delete":
-                self._delete_list()
                 return
             if path != "/import":
                 self._send(page("Not found", "<h1>Page not found</h1>"), status=HTTPStatus.NOT_FOUND)
@@ -918,59 +711,6 @@ def make_handler(db_path: Path, today_fn=date.today):
             finally:
                 conn.close()
             self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
-
-        def _save_list(self):
-            length = int(self.headers.get("Content-Length") or 0)
-            today = today_fn()
-
-            def fail(text: str, status=HTTPStatus.BAD_REQUEST):
-                conn = db.connect(db_path)
-                try:
-                    self._send(lists_page(conn, today, [], "",
-                                          f"<div class='note owe'>{escape(text)}</div>"), status=status)
-                finally:
-                    conn.close()
-
-            if length > MAX_UPLOAD_BYTES:
-                fail("That file is too big.", HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
-                return
-            form = read_form(self.headers.get("Content-Type", ""), self.rfile.read(length))
-            year = form.get("year", ("", b""))[1].decode("utf-8", "replace").strip()
-            if year not in list_year_options(today):
-                fail("Please choose a year.")
-                return
-            filename, data = form.get("file", ("", b""))
-            pasted = form.get("names", ("", b""))[1].decode("utf-8", "replace")
-            try:
-                if data:
-                    names, source = read_names(data, filename), filename
-                elif pasted.strip():
-                    names, source = names_from_text(pasted), "pasted names"
-                else:
-                    fail("Please choose a file or paste some names.")
-                    return
-            except ListError as exc:
-                fail(str(exc))
-                return
-            conn = db.connect(db_path)
-            try:
-                db.save_client_list(conn, year, names, source)
-                msg = (f"<div class='note ok'>Saved the {escape(year)} list with "
-                       f"{count(len(names), 'client')}. "
-                       f"<a href='/lists/view?year={quote(year)}'>Check the names →</a></div>")
-                self._send(lists_page(conn, today, [], "", msg))
-            finally:
-                conn.close()
-
-        def _delete_list(self):
-            length = min(int(self.headers.get("Content-Length") or 0), 10_000)
-            form = {k: v[0] for k, v in parse_qs(self.rfile.read(length).decode("utf-8")).items()}
-            conn = db.connect(db_path)
-            try:
-                db.delete_client_list(conn, form.get("year", ""))
-            finally:
-                conn.close()
-            self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": "/lists"})
 
     return Handler
 

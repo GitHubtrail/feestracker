@@ -15,17 +15,6 @@ folder next to the app and is never uploaded anywhere or added to this repositor
   or download the list as a spreadsheet (CSV).
 - **Unpaid by year**: every client who still owes on invoices from the years you tick
   (2023 and 2024 to start with), with one column per year. Download it as a CSV too.
-- **Client lists**: upload your client list for each year (Excel .xlsx, CSV, or names pasted
-  one per line). The return list exported from your tax software works as it is: sample and
-  template returns are skipped, and estimates, extensions and amended returns count once.
-  Only names are kept; other columns such as SSNs are never saved.
-  - Open a year's list to see, for each client, what they owe in TaxDome and when they were
-    last billed and paid. Clients with **no invoices in TaxDome** may never have been billed.
-  - With two or more lists, see **who is missing from a later year's list** (for example,
-    clients on the 2023 or 2024 list who are not on the 2025 list), and whether they still owe.
-  - Names are matched even when written differently ("Shah, Pinky" and "Pinky Shah", "Acme
-    Bakery, L.L.C." and "Acme Bakery LLC", a spouse added or not). Names that are only similar
-    are shown separately so you can check them.
 - **Who paid**: clients ranked by what they paid, for all time or for one year.
 - **Each client**: all their invoices and services, plus a ready-to-send payment
   reminder listing their open invoices and the total due, with a Copy button.
@@ -87,5 +76,5 @@ python3 -m pip install pytest && python3 -m pytest
 ```
 
 Code lives in `feestracker/`: `taxdome.py` reads the export, `db.py` stores it in SQLite,
-`reports.py` answers the questions, `clientlists.py` reads client lists and matches names, and `web.py` serves the pages using only the Python
+`reports.py` answers the questions, and `web.py` serves the pages using only the Python
 standard library. Tests use made-up invoices in `tests/fixtures/sample_bills.csv`.
