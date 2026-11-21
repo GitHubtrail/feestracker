@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
-from . import db, reports
+from . import db, reports, storage
 from .taxdome import ImportError_, format_cents, read_invoices
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -82,6 +82,7 @@ NAV = [
     ("/import", "Import"),
     ("/bad-debts", "Bad debts"),
     ("/checks", "Data checks"),
+    ("/data", "Your data & updates"),
 ]
 
 
@@ -125,7 +126,8 @@ def year_picker(path: str, years: list[str], chosen: str, label: str) -> str:
 def empty_state() -> str:
     return (
         '<div class=note>No invoices yet. Go to <a href="/import">Import</a> and choose the '
-        "bills export you downloaded from TaxDome.</div>"
+        "bills export you downloaded from TaxDome. If you used Fees Tracker before, look on "
+        '<a href="/data">Your data &amp; updates</a> first: your earlier data may be there.</div>'
     )
 
 
@@ -516,6 +518,51 @@ def unpaid_csv(conn: sqlite3.Connection, chosen: list[str]) -> bytes:
 
 
 
+def data_page(conn: sqlite3.Connection, db_path: Path, message: str = "") -> bytes:
+    here = storage.inspect(db_path)
+    old = storage.find_old_data(db_path)
+    rows = "".join(
+        f"<tr><td class=small>{escape(str(o.path.parent.parent))}</td>"
+        f"<td class=n>{o.invoices}</td><td class=n>{o.bad_debts}</td><td class=n>{o.payments}</td>"
+        f"<td class='small muted'>{o.modified:%Y-%m-%d %H:%M}</td><td>"
+        + (f"<form class=act method=post action='/data/bring-back'>"
+           f"<input type=hidden name=path value='{escape(str(o.path))}'>"
+           "<button>Bring back bad debts and payments</button></form>" if o.adjustments else "")
+        + "</td></tr>"
+        for o in old
+    )
+    old_html = ""
+    if old:
+        old_html = f"""<h2>Data found in older copies of the app</h2>
+    <p class=muted>If bad debts or payments you entered went missing after an update, they are probably
+      in one of these. <b>Bring back</b> copies them into your data. Your imported invoices and anything
+      already here are kept, so it is safe to click more than once.</p>
+    <div class=wrap><table><thead><tr><th>Folder</th><th class=n>Invoices</th><th class=n>Bad debts</th>
+      <th class=n>Payments you entered</th><th>Last changed</th><th></th></tr></thead>
+      <tbody>{rows}</tbody></table></div>"""
+    update = ("<form method=post action='/update' onsubmit=\"this.querySelector('button').textContent="
+              "'Updating…'\"><button>Update app</button></form>"
+              if storage.can_update() else
+              "<p class='small muted'>This copy is a developer checkout. Update it with git.</p>")
+    body = f"""<h1>Your data &amp; updates</h1>
+    {message}
+    <h2>Where your data is kept</h2>
+    <p><code>{escape(str(db_path.parent))}</code></p>
+    <p class=muted>It stays there when you update the app or download a new copy, so you never need to
+      import again or copy folders by hand. Back it up by copying that folder.</p>
+    <div class=cards>
+      <div class=card><div class=label>Invoices</div><div class=big>{here.invoices if here else 0}</div></div>
+      <div class=card><div class=label>Bad debts marked</div><div class=big>{here.bad_debts if here else 0}</div></div>
+      <div class=card><div class=label>Payments you entered</div><div class=big>{here.payments if here else 0}</div></div>
+    </div>
+    <h2>Update the app</h2>
+    <p class=muted>Downloads the newest version and puts it in place of this one. Your data is not touched.
+      When it says it's done, close the black window and open Fees Tracker again.</p>
+    {update}
+    {old_html}"""
+    return page("Your data & updates", body, "/data")
+
+
 def import_page(message: str = "") -> bytes:
     body = f"""<h1>Import from TaxDome</h1>
     {message}
@@ -571,7 +618,7 @@ def parse_amount(text: str) -> int | None:
     return int(whole or 0) * 100 + int((frac + "00")[:2])
 
 
-def make_handler(db_path: Path, today_fn=date.today):
+def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_app):
     class Handler(BaseHTTPRequestHandler):
         server_version = "FeesTracker"
 
@@ -619,6 +666,8 @@ def make_handler(db_path: Path, today_fn=date.today):
                     self._send(client_page(conn, today, q.get("name", "")))
                 elif url.path == "/import":
                     self._send(import_page())
+                elif url.path == "/data":
+                    self._send(data_page(conn, db_path))
                 elif url.path == "/checks":
                     self._send(checks(conn))
                 elif url.path == "/bad-debts":
@@ -642,6 +691,9 @@ def make_handler(db_path: Path, today_fn=date.today):
                 return
             if path == "/bad-debt":
                 self._bad_debt()
+                return
+            if path in ("/data/bring-back", "/update"):
+                self._data_action(path)
                 return
             if path == "/payment":
                 self._payment()
@@ -692,6 +744,32 @@ def make_handler(db_path: Path, today_fn=date.today):
             if not back.startswith("/") or back.startswith("//"):
                 back = "/"
             self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
+
+        def _data_action(self, path: str):
+            length = min(int(self.headers.get("Content-Length") or 0), 10_000)
+            form = {k: v[0] for k, v in parse_qs(self.rfile.read(length).decode("utf-8")).items()}
+            conn = db.connect(db_path)
+            try:
+                if path == "/update":
+                    try:
+                        update_fn()
+                        msg = ("<div class='note ok'><b>Updated.</b> Close the black Fees Tracker window "
+                               "and open Fees Tracker again to use the new version.</div>")
+                    except storage.UpdateError as exc:
+                        msg = f"<div class='note owe'>{escape(str(exc))}</div>"
+                else:
+                    # Only files the app itself found can be read, not any path sent to it.
+                    allowed = {str(o.path): o for o in storage.find_old_data(db_path)}
+                    old = allowed.get(form.get("path", ""))
+                    if not old:
+                        msg = "<div class='note owe'>That data file was not found.</div>"
+                    else:
+                        n = storage.bring_back_adjustments(conn, old.path)
+                        msg = (f"<div class='note ok'>Brought back {count(n['bad_debts'], 'bad debt')} and "
+                               f"{count(n['payments'], 'payment')}. <a href='/'>See the summary →</a></div>")
+                self._send(data_page(conn, db_path, msg))
+            finally:
+                conn.close()
 
         def _payment(self):
             length = min(int(self.headers.get("Content-Length") or 0), 10_000)

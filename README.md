@@ -3,8 +3,10 @@
 See who owes you, who has paid, and how much is still outstanding for each year,
 using the invoice export from TaxDome.
 
-Everything runs on your own computer. Your client data is saved in the `data/`
-folder next to the app and is never uploaded anywhere or added to this repository.
+Everything runs on your own computer. Your client data is saved in
+**Documents/Fees Tracker** (or a "Fees Tracker" folder in your home folder) and is never
+uploaded anywhere or added to this repository. Because it is kept outside the app's folder,
+a new version of the app finds it straight away.
 
 ## What you get
 
@@ -44,6 +46,20 @@ Nothing else needs installing.
 
 Your browser opens at <http://127.0.0.1:8765/>. Keep the small black window open while
 you use the app, and close it when you're done.
+
+## Update the app
+
+Click **Your data & updates**, then **Update app**. When it says it's done, close the black
+window and open Fees Tracker again. Your data is not touched, so there is nothing to import
+or copy. (Downloading a new ZIP still works too: the new copy finds your data in Documents.)
+
+The first time this version runs, it looks for data left in older copies of the app (their
+`data` folder, in Downloads, Desktop or Documents) and copies in the one with the most bad
+debts and payments you entered. The old files are left where they were.
+
+If bad debts or payments you entered went missing after an update, open **Your data &
+updates**: it lists data found in older copies, and **Bring back bad debts and payments**
+copies them into your current data without changing anything else.
 
 ## Load your TaxDome invoices
 
