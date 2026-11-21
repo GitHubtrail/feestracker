@@ -282,7 +282,7 @@ def score(a: tuple[str, ...], b: tuple[str, ...], spouse_added: bool = False) ->
     best = [max(_word_score(w, x) for x in long_) for w in short]
     if min(best) < 0.8:
         whole = SequenceMatcher(None, " ".join(a), " ".join(b)).ratio()
-        return min(whole, 0.85)  # never "the same" on the spelling of the whole string alone
+        return whole * 0.85  # never "the same" on the spelling of the whole string alone
     s = sum(best) / len(best)
     if len(short) < len(long_):
         extra = [x for x in long_ if max(_word_score(x, w) for w in short) < 0.8]
