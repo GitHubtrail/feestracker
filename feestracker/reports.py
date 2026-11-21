@@ -6,6 +6,9 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date
 
+from . import db
+from .clientlists import Matcher
+
 # Age buckets for money still owed, counted from the invoice date.
 AGE_BUCKETS = (
     ("0_30", "Up to 30 days", 0, 30),
@@ -192,3 +195,121 @@ def problems(conn: sqlite3.Connection) -> list[dict]:
            WHERE problems != '' ORDER BY invoice_date DESC"""
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def unpaid_by_years(conn: sqlite3.Connection, years: list[str]) -> list[dict]:
+    """Clients still owing on invoices from the given years, with one amount per year.
+
+    Bad debts are left out. Biggest total first.
+    """
+    years = sorted(set(years))
+    if not years:
+        return []
+    marks = ",".join("?" * len(years))
+    rows = conn.execute(
+        f"""SELECT client, substr(invoice_date, 1, 4) AS year, SUM(owed_cents) AS owed,
+                   COUNT(*) AS invoices, MIN(invoice_date) AS oldest
+            FROM invoice_view
+            WHERE owed_cents > 0 AND substr(invoice_date, 1, 4) IN ({marks})
+            GROUP BY client, year""",
+        years,
+    ).fetchall()
+    out: dict[str, dict] = {}
+    for r in rows:
+        c = out.setdefault(r["client"], {"client": r["client"], "owed": 0, "invoices": 0,
+                                         "oldest": r["oldest"], "by_year": dict.fromkeys(years, 0)})
+        c["by_year"][r["year"]] = r["owed"]
+        c["owed"] += r["owed"]
+        c["invoices"] += r["invoices"]
+        c["oldest"] = min(c["oldest"], r["oldest"])
+    last_paid = _last_paid(conn)
+    for c in out.values():
+        c["last_paid"] = last_paid.get(c["client"], "")
+    return sorted(out.values(), key=lambda c: (-c["owed"], c["client"]))
+
+
+def _last_paid(conn: sqlite3.Connection) -> dict[str, str]:
+    return {r[0]: r[1] or "" for r in conn.execute(
+        "SELECT client, MAX(NULLIF(paid_at, '')) FROM invoice_view WHERE paid_cents > 0 GROUP BY client")}
+
+
+def _client_facts(conn: sqlite3.Connection) -> dict[str, dict]:
+    """Per TaxDome client: what they owe now and their last invoice and payment."""
+    facts: dict[str, dict] = {}
+    for r in conn.execute(
+        """SELECT client, SUM(owed_cents) AS owed, MAX(invoice_date) AS last_invoice,
+                  MAX(CASE WHEN paid_cents > 0 THEN NULLIF(paid_at, '') END) AS last_paid
+           FROM invoice_view GROUP BY client"""
+    ):
+        facts[r["client"]] = {"owed": r["owed"] or 0, "last_invoice": r["last_invoice"] or "",
+                              "last_paid": r["last_paid"] or ""}
+    return facts
+
+
+def _with_taxdome(names: list[dict], facts: dict[str, dict]) -> list[dict]:
+    """Add the matching TaxDome client, and what they owe, to each list entry."""
+    taxdome = Matcher(list(facts))
+    out = []
+    for e in names:
+        t = taxdome.best(e["name"])
+        client = t.found if t.same else None
+        f = facts.get(client, {}) if client else {}
+        out.append(e | {
+            "taxdome": client,
+            "taxdome_maybe": t.found if t.maybe else None,
+            "owed": f.get("owed", 0),
+            "last_invoice": f.get("last_invoice", ""),
+            "last_paid": f.get("last_paid", ""),
+        })
+    return out
+
+
+def _by_owed(e: dict):
+    # Owing first, then names not found in TaxDome (maybe never billed), then the rest.
+    return (-e["owed"], 0 if not e["taxdome"] else 1, e["name"].lower())
+
+
+def client_list(conn: sqlite3.Connection, year: str) -> list[dict]:
+    """A saved client list, each name matched to TaxDome."""
+    entries = [{"name": n, "years": [year]} for n in db.client_list_names(conn, year)]
+    return sorted(_with_taxdome(entries, _client_facts(conn)), key=_by_owed)
+
+
+def missing_from_list(conn: sqlite3.Connection, from_years: list[str], to_year: str) -> dict:
+    """Clients on the from_years lists who are not on the to_year list.
+
+    Returns {"missing": [...], "check": [...], "found": n, "total": n}. "check" holds
+    names that look like a name on the to_year list but are spelled differently
+    enough that a person should decide. Each entry is matched to a TaxDome client
+    where possible, with what they owe and when they were last billed and paid.
+    """
+    from_years = sorted({y for y in from_years if y != to_year})
+    target = Matcher(db.client_list_names(conn, to_year))
+
+    # Merge the earlier lists, so a client on both the 2023 and 2024 lists shows once.
+    merged: list[dict] = []
+    merger = Matcher([])
+    for year in from_years:
+        for name in db.client_list_names(conn, year):
+            m = merger.best(name)
+            if m.same:
+                entry = next(e for e in merged if e["name"] == m.found)
+                if year not in entry["years"]:
+                    entry["years"].append(year)
+                continue
+            merged.append({"name": name, "years": [year]})
+            merger = Matcher([e["name"] for e in merged])
+
+    missing, check, found = [], [], 0
+    for e in merged:
+        m = target.best(e["name"])
+        if m.same:
+            found += 1
+        elif m.maybe:
+            check.append(e | {"close_name": m.found})
+        else:
+            missing.append(e | {"close_name": None})
+    facts = _client_facts(conn)
+    return {"missing": sorted(_with_taxdome(missing, facts), key=_by_owed),
+            "check": sorted(_with_taxdome(check, facts), key=_by_owed),
+            "found": found, "total": len(merged)}

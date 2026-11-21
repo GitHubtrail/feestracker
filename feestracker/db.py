@@ -71,6 +71,20 @@ SELECT i.*,
        CASE WHEN b.invoice_number IS NULL THEN 0 ELSE i.balance_cents END AS written_off_cents
 FROM invoices i LEFT JOIN bad_debts b ON b.invoice_number = i.number;
 
+-- Your own client lists, one per year, uploaded to compare years. Kept apart
+-- from TaxDome data so importing invoices never touches them.
+CREATE TABLE IF NOT EXISTS client_lists (
+    year        TEXT PRIMARY KEY,
+    source      TEXT NOT NULL DEFAULT '',
+    uploaded_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS client_list_names (
+    year     TEXT NOT NULL REFERENCES client_lists(year) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    name     TEXT NOT NULL,
+    PRIMARY KEY (year, position)
+);
+
 CREATE TABLE IF NOT EXISTS imports (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     source      TEXT NOT NULL,
@@ -158,3 +172,37 @@ def mark_bad_debt(conn: sqlite3.Connection, number: str, note: str = "") -> bool
 def unmark_bad_debt(conn: sqlite3.Connection, number: str) -> None:
     with conn:
         conn.execute("DELETE FROM bad_debts WHERE invoice_number = ?", (number,))
+
+
+def save_client_list(conn: sqlite3.Connection, year: str, names: list[str], source: str = "") -> None:
+    """Store the client list for a year, replacing any list already saved for it."""
+    with conn:
+        conn.execute("DELETE FROM client_lists WHERE year = ?", (year,))
+        conn.execute(
+            "INSERT INTO client_lists (year, source, uploaded_at) VALUES (?, ?, ?)",
+            (year, source, datetime.now().isoformat(timespec="seconds")),
+        )
+        conn.executemany(
+            "INSERT INTO client_list_names (year, position, name) VALUES (?, ?, ?)",
+            [(year, i, n) for i, n in enumerate(names)],
+        )
+
+
+def client_lists(conn: sqlite3.Connection) -> list[dict]:
+    """The saved lists, newest year first, with how many names each has."""
+    rows = conn.execute(
+        """SELECT l.year, l.source, l.uploaded_at, COUNT(n.name) AS names
+           FROM client_lists l LEFT JOIN client_list_names n ON n.year = l.year
+           GROUP BY l.year ORDER BY l.year DESC"""
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def client_list_names(conn: sqlite3.Connection, year: str) -> list[str]:
+    return [r[0] for r in conn.execute(
+        "SELECT name FROM client_list_names WHERE year = ? ORDER BY position", (year,))]
+
+
+def delete_client_list(conn: sqlite3.Connection, year: str) -> None:
+    with conn:
+        conn.execute("DELETE FROM client_lists WHERE year = ?", (year,))

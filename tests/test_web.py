@@ -136,3 +136,63 @@ def test_bad_debt_rejects_other_sites_and_bad_redirects(server):
     assert status == 303 and headers["Location"] == "/"
     status, _ = post_form(server, "/bad-debt", {"number": "missing", "action": "mark"})
     assert status == 404
+
+
+def upload_list(base, year, data=b"", filename="list.csv", names=""):
+    boundary = "----feestrackerlist"
+    parts = [("year", None, year.encode()), ("names", None, names.encode()),
+             ("file", filename, data)]
+    body = b""
+    for name, fname, value in parts:
+        disp = f'form-data; name="{name}"' + (f'; filename="{fname}"' if fname else "")
+        body += f"--{boundary}\r\nContent-Disposition: {disp}\r\n\r\n".encode() + value + b"\r\n"
+    body += f"--{boundary}--\r\n".encode()
+    req = urllib.request.Request(
+        base + "/lists", data=body, method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+
+
+def test_unpaid_by_year(server):
+    upload(server, FIXTURE.read_bytes())
+    html = get(server + "/unpaid?year=2022&year=2026")
+    assert "Rivera Maria" in html and "$750.00" in html
+    assert get(server + "/unpaid.csv?year=2022").splitlines()[1].startswith("Rivera Maria,600.00")
+    assert "Nobody owes" in get(server + "/unpaid")  # 2023 and 2024 by default
+
+
+def test_client_lists_compare(server):
+    upload(server, FIXTURE.read_bytes())
+    status, html = upload_list(server, "2023", b"Name\nRivera, Maria\nAcme Bakery LLC\nLopez Ana\n")
+    assert status == 200 and "Saved the 2023 list with 3 clients" in html
+    assert "Add at least one more" in html
+    status, html = upload_list(server, "2025", names="Acme Bakery\nLopez Ana\n")
+    assert status == 200 and "Saved the 2025 list with 2 clients" in html
+    assert "Who is missing from the 2025 list?" in html
+    missing = html.split("Not on the 2025 list</h2>")[1]
+    assert "Rivera, Maria" in missing and "$750.00" in missing and "Lopez" not in missing
+    assert "Rivera, Maria" in get(server + "/lists/missing.csv")
+
+    view = get(server + "/lists/view?year=2023")
+    assert "In TaxDome as" in view and "No invoices in TaxDome" in view  # Lopez Ana
+
+    status, _ = post_form(server, "/lists/delete", {"year": "2025"})
+    assert status == 303
+    after = get(server + "/lists")
+    assert "/lists/view?year=2023" in after and "/lists/view?year=2025" not in after
+
+
+def test_client_list_errors(server):
+    status, html = upload_list(server, "2023")
+    assert status == 400 and "Please choose a file or paste some names" in html
+    status, html = upload_list(server, "1900", names="Bob")
+    assert status == 400 and "Please choose a year" in html
+    status, html = upload_list(server, "2023", b"\xd0\xcf\x11\xe0xx", "old.xls")
+    assert status == 400 and "old-style Excel" in html
+    upload_list(server, "2023", names="<script>x</script>")
+    assert "<script>x</script>" not in get(server + "/lists/view?year=2023")
