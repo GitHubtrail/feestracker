@@ -42,6 +42,8 @@ class Summary:
     clients_owing: int
     written_off_cents: int
     written_off_invoices: int
+    overpaid_cents: int
+    overpaid_invoices: int
     last_import: str
 
 
@@ -49,9 +51,11 @@ def summary(conn: sqlite3.Connection) -> Summary:
     row = conn.execute(
         """SELECT COUNT(*) AS n,
                   COALESCE(SUM(total_cents), 0) AS billed,
-                  COALESCE(SUM(paid_cents), 0) AS collected,
+                  COALESCE(SUM(collected_cents), 0) AS collected,
                   COALESCE(SUM(owed_cents), 0) AS outstanding,
                   COALESCE(SUM(owed_cents > 0), 0) AS open_n,
+                  COALESCE(SUM(overpaid_cents), 0) AS overpaid,
+                  COALESCE(SUM(overpaid_cents != 0), 0) AS overpaid_n,
                   COUNT(DISTINCT CASE WHEN owed_cents > 0 THEN client END) AS owing,
                   COALESCE(SUM(written_off_cents), 0) AS written_off,
                   COALESCE(SUM(written_off_cents > 0), 0) AS written_off_n
@@ -67,17 +71,24 @@ def summary(conn: sqlite3.Connection) -> Summary:
         clients_owing=row["owing"],
         written_off_cents=row["written_off"],
         written_off_invoices=row["written_off_n"],
+        overpaid_cents=row["overpaid"],
+        overpaid_invoices=row["overpaid_n"],
         last_import=last["imported_at"] if last else "",
     )
 
 
 def by_year(conn: sqlite3.Connection) -> list[dict]:
-    """Billed, collected and still owed, grouped by the year of the invoice."""
+    """Billed, collected and still owed, grouped by the year of the invoice.
+
+    Billed = collected + still owed + bad debt in every row. Money paid above
+    an invoice's amount is in "overpaid", outside that sum.
+    """
     rows = conn.execute(
         """SELECT substr(invoice_date, 1, 4) AS year,
                   COUNT(*) AS invoices,
                   SUM(total_cents) AS billed,
-                  SUM(paid_cents) AS collected,
+                  SUM(collected_cents) AS collected,
+                  SUM(overpaid_cents) AS overpaid,
                   SUM(owed_cents) AS outstanding,
                   SUM(owed_cents > 0) AS open_invoices,
                   COUNT(DISTINCT CASE WHEN owed_cents > 0 THEN client END) AS clients_owing,

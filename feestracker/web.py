@@ -138,20 +138,29 @@ def home(conn: sqlite3.Connection, today: date) -> bytes:
         return page("Summary", "<h1>Summary</h1>" + empty_state(), "/")
     owing = reports.who_owes(conn, today)
     ages = reports.age_totals(owing)
+    overpaid = ""
+    if s.overpaid_cents:
+        overpaid = (
+            f"<p class='small muted'>Not included above: {money(s.overpaid_cents)} paid above the invoice "
+            f"amount on {count(s.overpaid_invoices, 'invoice')}, for example one payment that covered "
+            "several invoices. See <a href='/checks'>Data checks</a>.</p>"
+        )
     cards = f"""
     <div class=cards>
-      <div class=card><div class=label>Owed to you now</div>
-        <div class="big owe">{money(s.outstanding_cents)}</div>
-        <div class="small muted">{s.open_invoices} invoices · {s.clients_owing} clients</div></div>
-      <div class=card><div class=label>Collected</div>
-        <div class="big ok">{money(s.collected_cents)}</div></div>
       <div class=card><div class=label>Billed</div>
         <div class=big>{money(s.billed_cents)}</div>
         <div class="small muted">{s.invoices} invoices</div></div>
+      <div class=card><div class=label>Collected</div>
+        <div class="big ok">{money(s.collected_cents)}</div></div>
+      <div class=card><div class=label>Owed to you now</div>
+        <div class="big owe">{money(s.outstanding_cents)}</div>
+        <div class="small muted">{s.open_invoices} invoices · {s.clients_owing} clients</div></div>
       <div class=card><div class=label>Written off as bad debt</div>
         <div class="big muted">{money(s.written_off_cents)}</div>
         <div class="small muted"><a href="/bad-debts">{count(s.written_off_invoices, 'invoice')}</a></div></div>
-    </div>"""
+    </div>
+    <p class="small muted">Billed = collected + owed + bad debt.</p>
+    {overpaid}"""
     age_rows = "".join(
         f"<tr><td>{label}</td><td class=n>{money(ages[key])}</td></tr>"
         for key, label, *_ in reports.AGE_BUCKETS
@@ -161,6 +170,7 @@ def home(conn: sqlite3.Connection, today: date) -> bytes:
             <td class=n>{money(y['billed'])}</td><td class="n ok">{money(y['collected'])}</td>
             <td class="n owe">{money(y['outstanding'])}</td>
             <td class="n muted">{money(y['written_off'])}</td>
+            <td class="n muted">{money(y['overpaid']) if y['overpaid'] else '–'}</td>
             <td class=n><a href="/owes?year={quote(y['year'])}">{y['clients_owing']} clients</a></td></tr>"""
         for y in reports.by_year(conn)
     )
@@ -175,7 +185,10 @@ def home(conn: sqlite3.Connection, today: date) -> bytes:
     <h2>Year by year</h2>
     <div class=wrap><table><thead><tr><th>Invoice year</th><th class=n>Invoices</th>
       <th class=n>Billed</th><th class=n>Collected</th><th class=n>Still owed</th>
-      <th class=n>Bad debt</th><th class=n>Clients owing</th></tr></thead><tbody>{year_rows}</tbody></table></div>
+      <th class=n>Bad debt</th><th class=n>Paid above invoice</th><th class=n>Clients owing</th></tr></thead>
+      <tbody>{year_rows}</tbody></table></div>
+    <p class="small muted">In each year, billed = collected + still owed + bad debt.
+      “Paid above invoice” is extra money received on top of that.</p>
     <h2>How old is the money owed?</h2>
     <div class=wrap><table><tbody>{age_rows}</tbody></table></div>
     <h2>Biggest balances</h2>

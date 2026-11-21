@@ -51,6 +51,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Invoices:  {s.invoices}")
         print(f"Billed:    {format_cents(s.billed_cents)}")
         print(f"Collected: {format_cents(s.collected_cents)}")
+        if s.overpaid_cents:
+            print(f"           (plus {format_cents(s.overpaid_cents)} paid above invoice amounts)")
         print(f"Owed now:  {format_cents(s.outstanding_cents)}  "
               f"({s.open_invoices} invoices, {s.clients_owing} clients)")
         print("\nYear   Billed          Collected       Still owed")
