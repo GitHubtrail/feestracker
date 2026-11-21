@@ -9,6 +9,7 @@ import csv
 import email.parser
 import email.policy
 import io
+import re
 import sqlite3
 from datetime import date
 from html import escape
@@ -61,11 +62,21 @@ form.act { margin:6px 0 0 }
 form.act button { background:transparent; color:var(--accent); border:1px solid var(--line);
                   padding:2px 10px; font-size:13px }
 .pill.bad { color:var(--muted); background:var(--bg) }
+fieldset { border:1px solid var(--line); border-radius:10px; background:var(--card); padding:12px 16px; margin:0 0 16px }
+fieldset label { margin-right:14px; white-space:nowrap }
+details.act summary { cursor:pointer; color:var(--accent); margin-top:6px }
+details.act input { font:inherit; padding:4px 6px; border:1px solid var(--line); border-radius:6px;
+                    background:var(--bg); color:var(--ink) }
+.stack > * { margin:0 0 10px }
 """
+
+# The years Sarita asked to follow up on first.
+DEFAULT_UNPAID_YEARS = ("2023", "2024")
 
 NAV = [
     ("/", "Summary"),
     ("/owes", "Who owes"),
+    ("/unpaid", "Unpaid by year"),
     ("/paid", "Who paid"),
     ("/clients", "All clients"),
     ("/import", "Import"),
@@ -305,8 +316,8 @@ def client_page(conn: sqlite3.Connection, today: date, name: str) -> bytes:
             f"<tr><td>{escape(i['number'])}</td><td>{escape(i['invoice_date'][:10])}</td>"
             f"<td><span class='pill {STATUS_CLASS.get(i['status'], '')}'>{escape(i['status'])}</span>{age}</td>"
             f"<td class=small>{services}</td><td class=n>{money(i['total_cents'])}</td>"
-            f"<td class='n ok'>{money(i['paid_cents'])}</td>"
-            f"<td class=n>{owes_cell(i, name)}</td></tr>"
+            f"<td class='n ok'>{paid_cell(conn, i, name)}</td>"
+            f"<td class=n>{owes_cell(i, name, today)}</td></tr>"
         )
     reminder = ""
     if open_invs:
@@ -350,7 +361,45 @@ def bad_debt_button(number: str, mark: bool, back: str) -> str:
     )
 
 
-def owes_cell(inv: dict, client: str) -> str:
+def paid_cell(conn: sqlite3.Connection, inv: dict, client: str) -> str:
+    """What was paid, listing any payments entered here with a Delete button each."""
+    out = money(inv["paid_cents"])
+    if not inv["manual_paid_cents"]:
+        return out
+    back = "/client?name=" + quote(client)
+    for p in db.manual_payments(conn, inv["number"]):
+        note = f" · {escape(p['note'])}" if p["note"] else ""
+        out += (
+            f"<div class='small muted'>{money(p['amount_cents'])} on {escape(p['paid_on'])}{note}"
+            f"<form class=act method=post action='/payment' "
+            f"onsubmit=\"return confirm('Delete this payment?')\">"
+            f"<input type=hidden name=action value=delete>"
+            f"<input type=hidden name=id value='{p['id']}'>"
+            f"<input type=hidden name=back value='{escape(back)}'><button>Delete</button></form></div>"
+        )
+    if inv["status"] == "paid":
+        out += ("<div class='small warn'>TaxDome now shows this invoice as paid. If that includes "
+                "the payment you entered here, delete yours so it isn't counted twice.</div>")
+    return out
+
+
+def payment_form(number: str, back: str, today: date) -> str:
+    """A small form to record money received for one invoice, such as a part payment."""
+    return (
+        "<details class=act><summary class=small>Record payment</summary>"
+        "<form method=post action='/payment' class=stack style='margin-top:6px;text-align:left'>"
+        "<input type=hidden name=action value=add>"
+        f"<input type=hidden name=number value='{escape(number)}'>"
+        f"<input type=hidden name=back value='{escape(back)}'>"
+        "<div><label class=small>Amount received<br><input name=amount inputmode=decimal required "
+        "placeholder='500.00' size=10></label></div>"
+        f"<div><label class=small>Date<br><input type=date name=paid_on value='{today.isoformat()}' required></label></div>"
+        "<div><label class=small>Note (optional)<br><input name=note placeholder='Zelle' size=14></label></div>"
+        "<div><button>Save payment</button></div></form></details>"
+    )
+
+
+def owes_cell(inv: dict, client: str, today: date) -> str:
     back = "/client?name=" + quote(client)
     if inv["bad_debt"]:
         return (
@@ -359,9 +408,9 @@ def owes_cell(inv: dict, client: str) -> str:
             + bad_debt_button(inv["number"], False, back)
         )
     if inv["owed_cents"] > 0:
-        return f"<span class=owe>{money(inv['owed_cents'])}</span>" + bad_debt_button(
-            inv["number"], True, back
-        )
+        return (f"<span class=owe>{money(inv['owed_cents'])}</span>"
+                + payment_form(inv["number"], back, today)
+                + bad_debt_button(inv["number"], True, back))
     return f"<span class=muted>{money(0)}</span>"
 
 
@@ -398,6 +447,60 @@ def bad_debts_page(conn: sqlite3.Connection) -> bytes:
       <th class=n>Paid</th><th class=n>Written off</th><th>Marked on</th><th></th></tr></thead>
       <tbody>{rows or '<tr><td colspan=8 class=muted>No bad debts.</td></tr>'}</tbody></table></div>"""
     return page("Bad debts", body, "/bad-debts")
+
+
+def year_checkboxes(name: str, years: list[str], chosen: list[str]) -> str:
+    return "".join(
+        f'<label><input type=checkbox name={name} value="{escape(y)}"'
+        f'{" checked" if y in chosen else ""}> {escape(y)}</label>'
+        for y in years
+    )
+
+
+def unpaid(conn: sqlite3.Connection, chosen: list[str]) -> bytes:
+    all_years = [y for y in reports.years(conn)]
+    if not chosen:
+        chosen = [y for y in DEFAULT_UNPAID_YEARS if y in all_years] or all_years[1:3]
+    chosen = sorted(set(chosen))
+    found = reports.unpaid_by_years(conn, chosen)
+    heads = "".join(f"<th class=n>{escape(y)}</th>" for y in chosen)
+    rows = "".join(
+        f"<tr><td>{client_link(c['client'])}</td>"
+        + "".join(
+            f"<td class=n>{money(c['by_year'][y]) if c['by_year'][y] else '<span class=muted>–</span>'}</td>"
+            for y in chosen
+        )
+        + f"<td class='n owe'><b>{money(c['owed'])}</b></td><td class=n>{c['invoices']}</td>"
+        f"<td class=muted>{escape(c['last_paid'][:10]) or 'never'}</td></tr>"
+        for c in found
+    )
+    totals = "".join(f"<td class=n>{money(sum(c['by_year'][y] for c in found))}</td>" for y in chosen)
+    query = "&".join(f"year={quote(y)}" for y in chosen)
+    body = f"""<h1>Unpaid by year</h1>
+    <form method=get action="/unpaid"><fieldset><legend>Invoices from</legend>
+      {year_checkboxes('year', all_years, chosen)} <button>Show</button></fieldset></form>
+    <p class="small muted">Clients who still owe on invoices dated in {escape(' or '.join(chosen))}.
+      Bad debts are left out. Click a client for their invoices and a payment reminder.
+      <a href="/unpaid.csv?{query}">Download this list (CSV)</a></p>
+    <div class=wrap><table><thead><tr><th>Client</th>{heads}<th class=n>Total unpaid</th>
+      <th class=n>Invoices</th><th>Last payment</th></tr></thead>
+      <tbody>{rows or f'<tr><td colspan={len(chosen) + 4} class=muted>Nobody owes on invoices from these years.</td></tr>'}</tbody>
+      <tfoot><tr><td>Total ({count(len(found), 'client')})</td>{totals}
+      <td class='n owe'>{money(sum(c['owed'] for c in found))}</td>
+      <td class=n>{sum(c['invoices'] for c in found)}</td><td></td></tr></tfoot></table></div>"""
+    return page("Unpaid by year", body, "/unpaid")
+
+
+def unpaid_csv(conn: sqlite3.Connection, chosen: list[str]) -> bytes:
+    chosen = sorted(set(chosen)) or list(DEFAULT_UNPAID_YEARS)
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["Client"] + [f"Unpaid {y}" for y in chosen] + ["Total unpaid", "Invoices", "Last payment"])
+    for c in reports.unpaid_by_years(conn, chosen):
+        w.writerow([c["client"]] + [f"{c['by_year'][y] / 100:.2f}" for y in chosen]
+                   + [f"{c['owed'] / 100:.2f}", c["invoices"], c["last_paid"][:10]])
+    return out.getvalue().encode("utf-8-sig")
+
 
 
 def import_page(message: str = "") -> bytes:
@@ -446,6 +549,15 @@ def read_upload(content_type: str, body: bytes) -> bytes | None:
     return None
 
 
+def parse_amount(text: str) -> int | None:
+    """'$1,250.50' -> 125050 cents. None if it isn't a number."""
+    cleaned = text.strip().replace("$", "").replace(",", "").replace(" ", "")
+    if not re.fullmatch(r"\d{1,9}(\.\d{1,2})?|\.\d{1,2}", cleaned):
+        return None
+    whole, _, frac = cleaned.partition(".")
+    return int(whole or 0) * 100 + int((frac + "00")[:2])
+
+
 def make_handler(db_path: Path, today_fn=date.today):
     class Handler(BaseHTTPRequestHandler):
         server_version = "FeesTracker"
@@ -466,7 +578,8 @@ def make_handler(db_path: Path, today_fn=date.today):
 
         def do_GET(self):
             url = urlparse(self.path)
-            q = {k: v[0] for k, v in parse_qs(url.query).items()}
+            multi = parse_qs(url.query)
+            q = {k: v[0] for k, v in multi.items()}
             year = q.get("year", "")
             conn = db.connect(db_path)
             try:
@@ -479,6 +592,12 @@ def make_handler(db_path: Path, today_fn=date.today):
                     name = f"who-owes{'-' + year if year else ''}-{today.isoformat()}.csv"
                     self._send(owes_csv(conn, today, year), "text/csv; charset=utf-8",
                                extra={"Content-Disposition": f'attachment; filename="{name}"'})
+                elif url.path == "/unpaid":
+                    self._send(unpaid(conn, multi.get("year", [])))
+                elif url.path == "/unpaid.csv":
+                    self._send(unpaid_csv(conn, multi.get("year", [])), "text/csv; charset=utf-8",
+                               extra={"Content-Disposition":
+                                      f'attachment; filename="unpaid-{today.isoformat()}.csv"'})
                 elif url.path == "/paid":
                     self._send(paid(conn, year))
                 elif url.path == "/clients":
@@ -510,6 +629,9 @@ def make_handler(db_path: Path, today_fn=date.today):
                 return
             if path == "/bad-debt":
                 self._bad_debt()
+                return
+            if path == "/payment":
+                self._payment()
                 return
             if path != "/import":
                 self._send(page("Not found", "<h1>Page not found</h1>"), status=HTTPStatus.NOT_FOUND)
@@ -556,6 +678,38 @@ def make_handler(db_path: Path, today_fn=date.today):
             back = form.get("back", "/")
             if not back.startswith("/") or back.startswith("//"):
                 back = "/"
+            self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
+
+        def _payment(self):
+            length = min(int(self.headers.get("Content-Length") or 0), 10_000)
+            form = {k: v[0] for k, v in parse_qs(self.rfile.read(length).decode("utf-8")).items()}
+            back = form.get("back", "/")
+            if not back.startswith("/") or back.startswith("//"):
+                back = "/"
+            conn = db.connect(db_path)
+            try:
+                if form.get("action") == "delete":
+                    if form.get("id", "").isdigit():
+                        db.delete_payment(conn, int(form["id"]))
+                else:
+                    cents = parse_amount(form.get("amount", ""))
+                    paid_on = form.get("paid_on", "")
+                    try:
+                        date.fromisoformat(paid_on)
+                    except ValueError:
+                        paid_on = ""
+                    if cents is None or cents <= 0 or not paid_on:
+                        self._send(page("Payment not saved",
+                                        "<h1>Payment not saved</h1><p>Please enter an amount such as "
+                                        f"500 or 1,250.50 and a date. <a href='{escape(back)}'>Go back</a></p>"),
+                                   status=HTTPStatus.BAD_REQUEST)
+                        return
+                    if not db.add_payment(conn, form.get("number", ""), cents, paid_on, form.get("note", "")):
+                        self._send(page("Not found", "<h1>Invoice not found</h1>"),
+                                   status=HTTPStatus.NOT_FOUND)
+                        return
+            finally:
+                conn.close()
             self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
 
     return Handler

@@ -136,3 +136,56 @@ def test_bad_debt_rejects_other_sites_and_bad_redirects(server):
     assert status == 303 and headers["Location"] == "/"
     status, _ = post_form(server, "/bad-debt", {"number": "missing", "action": "mark"})
     assert status == 404
+
+
+def test_unpaid_by_year(server):
+    upload(server, FIXTURE.read_bytes())
+    html = get(server + "/unpaid?year=2022&year=2026")
+    assert "Rivera Maria" in html and "$750.00" in html
+    assert get(server + "/unpaid.csv?year=2022").splitlines()[1].startswith("Rivera Maria,600.00")
+    assert "Nobody owes" in get(server + "/unpaid")  # 2023 and 2024 by default
+
+
+def test_parse_amount():
+    assert web.parse_amount("$1,250.5") == 125050
+    assert web.parse_amount("500") == 50000
+    assert web.parse_amount(".75") == 75
+    for bad in ["", "abc", "1.234", "-5", "inf", "nan", "1e5"]:
+        assert web.parse_amount(bad) is None
+
+
+def test_record_part_payment(server):
+    upload(server, FIXTURE.read_bytes())
+    back = "/client?name=Rivera%20Maria"
+    assert "Record payment" in get(server + back)
+
+    status, headers = post_form(server, "/payment", {
+        "action": "add", "number": "1003", "amount": "$200.00", "paid_on": "2026-11-15",
+        "note": "Zelle", "back": back})
+    assert status == 303 and headers["Location"] == back
+
+    client = get(server + back)
+    assert "$200.00 on 2026-11-15 · Zelle" in client
+    assert "Invoice 1003 dated 2022-05-10: $400.00" in client  # the rest is still owed
+    assert "Total due: $550.00" in client
+    assert "$1,356.00" in get(server + "/")  # owed now, was $1,556.00
+
+    status, _ = post_form(server, "/payment", {
+        "action": "add", "number": "1003", "amount": "lots", "paid_on": "2026-11-15", "back": back})
+    assert status == 400
+    status, _ = post_form(server, "/payment", {
+        "action": "add", "number": "nope", "amount": "5", "paid_on": "2026-11-15", "back": back})
+    assert status == 404
+
+    # Paying the rest clears the invoice, and a new import keeps the payments.
+    post_form(server, "/payment", {
+        "action": "add", "number": "1003", "amount": "400", "paid_on": "2026-11-18", "back": back})
+    upload(server, FIXTURE.read_bytes())
+    client = get(server + back)
+    assert "Invoice 1003" not in client.split("</textarea>")[0]
+    assert "Total due: $150.00" in client
+
+    import re
+    first_id = re.search(r"name=id value='(\d+)'", client).group(1)
+    post_form(server, "/payment", {"action": "delete", "id": first_id, "back": back})
+    assert "Invoice 1003 dated 2022-05-10: $200.00" in get(server + back)  # only the $400 is left

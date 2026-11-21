@@ -62,14 +62,46 @@ CREATE TABLE IF NOT EXISTS bad_debts (
     note           TEXT NOT NULL DEFAULT ''
 );
 
--- What the reports read: each invoice, with its unpaid balance split into
--- money still owed and money written off as bad debt.
-CREATE VIEW IF NOT EXISTS invoice_view AS
-SELECT i.*,
-       b.invoice_number IS NOT NULL AS bad_debt,
-       CASE WHEN b.invoice_number IS NULL THEN i.balance_cents ELSE 0 END AS owed_cents,
-       CASE WHEN b.invoice_number IS NULL THEN 0 ELSE i.balance_cents END AS written_off_cents
-FROM invoices i LEFT JOIN bad_debts b ON b.invoice_number = i.number;
+-- Payments you entered in Fees Tracker yourself, for example a client who paid
+-- part of an invoice by Zelle or cheque that isn't in TaxDome yet. Keyed by
+-- invoice number so a new import never loses them.
+CREATE TABLE IF NOT EXISTS manual_payments (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    invoice_number TEXT NOT NULL,
+    paid_on        TEXT NOT NULL,
+    amount_cents   INTEGER NOT NULL CHECK (amount_cents > 0),
+    note           TEXT NOT NULL DEFAULT '',
+    entered_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS manual_payments_invoice ON manual_payments(invoice_number);
+
+-- What the reports read: each invoice with the payments you entered added to
+-- what TaxDome says was paid, and its unpaid balance split into money still
+-- owed and money written off as bad debt. Recreated on every start so older
+-- data folders pick up changes.
+DROP VIEW IF EXISTS invoice_view;
+CREATE VIEW invoice_view AS
+WITH m AS (SELECT invoice_number, SUM(amount_cents) AS cents, MAX(paid_on) AS last_on
+           FROM manual_payments GROUP BY invoice_number),
+     v AS (
+       SELECT i.number, i.status, i.client, i.assigned_to, i.description, i.created_at,
+              i.updated_at, i.invoice_date, i.payment_methods, i.timezone, i.total_cents,
+              i.problems,
+              i.paid_cents AS taxdome_paid_cents,
+              COALESCE(m.cents, 0) AS manual_paid_cents,
+              i.paid_cents + COALESCE(m.cents, 0) AS paid_cents,
+              MAX(i.balance_cents - COALESCE(m.cents, 0), 0) AS balance_cents,
+              CASE WHEN i.paid_at = '' AND m.cents IS NOT NULL
+                        AND i.balance_cents - m.cents <= 0 THEN m.last_on
+                   ELSE i.paid_at END AS paid_at,
+              b.invoice_number IS NOT NULL AS bad_debt
+       FROM invoices i
+       LEFT JOIN m ON m.invoice_number = i.number
+       LEFT JOIN bad_debts b ON b.invoice_number = i.number)
+SELECT v.*,
+       CASE WHEN bad_debt THEN 0 ELSE balance_cents END AS owed_cents,
+       CASE WHEN bad_debt THEN balance_cents ELSE 0 END AS written_off_cents
+FROM v;
 
 CREATE TABLE IF NOT EXISTS imports (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -158,3 +190,29 @@ def mark_bad_debt(conn: sqlite3.Connection, number: str, note: str = "") -> bool
 def unmark_bad_debt(conn: sqlite3.Connection, number: str) -> None:
     with conn:
         conn.execute("DELETE FROM bad_debts WHERE invoice_number = ?", (number,))
+
+
+def add_payment(conn: sqlite3.Connection, number: str, amount_cents: int, paid_on: str,
+                note: str = "") -> bool:
+    """Record a payment you received for an invoice. Returns False if there is no such invoice."""
+    if amount_cents <= 0:
+        raise ValueError("amount must be more than zero")
+    if not conn.execute("SELECT 1 FROM invoices WHERE number = ?", (number,)).fetchone():
+        return False
+    with conn:
+        conn.execute(
+            """INSERT INTO manual_payments (invoice_number, paid_on, amount_cents, note, entered_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (number, paid_on, amount_cents, note.strip(), datetime.now().isoformat(timespec="seconds")),
+        )
+    return True
+
+
+def delete_payment(conn: sqlite3.Connection, payment_id: int) -> None:
+    with conn:
+        conn.execute("DELETE FROM manual_payments WHERE id = ?", (payment_id,))
+
+
+def manual_payments(conn: sqlite3.Connection, number: str) -> list[dict]:
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM manual_payments WHERE invoice_number = ? ORDER BY paid_on, id", (number,))]

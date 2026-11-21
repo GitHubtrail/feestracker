@@ -6,6 +6,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date
 
+
 # Age buckets for money still owed, counted from the invoice date.
 AGE_BUCKETS = (
     ("0_30", "Up to 30 days", 0, 30),
@@ -192,3 +193,39 @@ def problems(conn: sqlite3.Connection) -> list[dict]:
            WHERE problems != '' ORDER BY invoice_date DESC"""
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def unpaid_by_years(conn: sqlite3.Connection, years: list[str]) -> list[dict]:
+    """Clients still owing on invoices from the given years, with one amount per year.
+
+    Bad debts are left out. Biggest total first.
+    """
+    years = sorted(set(years))
+    if not years:
+        return []
+    marks = ",".join("?" * len(years))
+    rows = conn.execute(
+        f"""SELECT client, substr(invoice_date, 1, 4) AS year, SUM(owed_cents) AS owed,
+                   COUNT(*) AS invoices, MIN(invoice_date) AS oldest
+            FROM invoice_view
+            WHERE owed_cents > 0 AND substr(invoice_date, 1, 4) IN ({marks})
+            GROUP BY client, year""",
+        years,
+    ).fetchall()
+    out: dict[str, dict] = {}
+    for r in rows:
+        c = out.setdefault(r["client"], {"client": r["client"], "owed": 0, "invoices": 0,
+                                         "oldest": r["oldest"], "by_year": dict.fromkeys(years, 0)})
+        c["by_year"][r["year"]] = r["owed"]
+        c["owed"] += r["owed"]
+        c["invoices"] += r["invoices"]
+        c["oldest"] = min(c["oldest"], r["oldest"])
+    last_paid = _last_paid(conn)
+    for c in out.values():
+        c["last_paid"] = last_paid.get(c["client"], "")
+    return sorted(out.values(), key=lambda c: (-c["owed"], c["client"]))
+
+
+def _last_paid(conn: sqlite3.Connection) -> dict[str, str]:
+    return {r[0]: r[1] or "" for r in conn.execute(
+        "SELECT client, MAX(NULLIF(paid_at, '')) FROM invoice_view WHERE paid_cents > 0 GROUP BY client")}

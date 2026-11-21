@@ -107,3 +107,9 @@ def test_bad_debt_later_paid_counts_nothing(conn):
     db.mark_bad_debt(conn, "1001")  # already paid
     s = reports.summary(conn)
     assert s.written_off_cents == 0 and s.outstanding_cents == 155600
+
+
+def test_unpaid_by_years(conn):
+    rows = reports.unpaid_by_years(conn, ["2022", "2025"])
+    assert [r["client"] for r in rows] == ["Rivera Maria"]  # Chen's 2025 invoice owes nothing
+    assert rows[0]["by_year"] == {"2022": 60000, "2025": 0}
