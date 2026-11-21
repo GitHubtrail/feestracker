@@ -151,7 +151,8 @@ def overpayments(conn: sqlite3.Connection) -> dict[str, dict]:
         "SELECT number, client, total_cents, collected_cents, overpaid_cents FROM invoice_view")}
     payments: dict[str, list[int]] = {}
     for p in conn.execute("SELECT invoice_number, amount_cents FROM payments WHERE status = 'succeeded'"):
-        payments.setdefault(p["invoice_number"], []).append(p["amount_cents"])
+        if p["invoice_number"] in invoices:  # not a removed client's
+            payments.setdefault(p["invoice_number"], []).append(p["amount_cents"])
     listed_on: dict[tuple, set] = {}
     for number, amounts in payments.items():
         for amount in amounts:
@@ -357,10 +358,13 @@ def not_billed(conn: sqlite3.Connection, year: str) -> dict:
     last = {r["client"]: r["last"] for r in conn.execute(
         "SELECT client, MAX(invoice_date) AS last FROM invoice_view GROUP BY client")}
     taxdome = Matcher(list(years))
+    removed = set(db.removed_clients(conn))
     rows = []
     for name in names:
         m = taxdome.best(name)
         client = m.found if m.same else None
+        if name in removed or client in removed:
+            continue
         billed = sorted(years.get(client, set())) if client else []
         if year in billed:
             continue

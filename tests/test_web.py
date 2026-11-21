@@ -291,3 +291,34 @@ def test_client_list_upload_keeps_only_names_and_touches_nothing_else(server, tm
 def test_client_list_needs_a_real_year(server):
     status, html = post_list(server, "1999", "c.csv", b"Name\nA Person\n")
     assert status == 400 and "choose a tax year" in html
+
+
+def test_remove_clients_in_one_go_and_put_back(server, tmp_path):
+    upload(server, FIXTURE.read_bytes())
+    conn = db.connect(tmp_path / "web.db")
+    billed_before = conn.execute("SELECT SUM(total_cents) FROM invoice_view").fetchone()[0]
+    status = post_multi(server, "/clients/remove", [
+        ("name", "Acme Bakery, LLC"), ("name", "Rivera Maria"), ("back", "/clients")])
+    assert status == 303
+    html = get(server + "/clients")
+    assert "Removed clients (2)" in html
+    assert "/client?name=Acme" not in html and "/client?name=Rivera" not in html
+    assert "Rivera Maria" not in get(server + "/owes") and "Rivera Maria" not in get(server + "/")
+    billed_now = conn.execute("SELECT SUM(total_cents) FROM invoice_view").fetchone()[0]
+    assert billed_now < billed_before
+
+    # A new import doesn't bring them back.
+    upload(server, FIXTURE.read_bytes())
+    assert "Removed clients (2)" in get(server + "/clients")
+
+    # Removing from the Not billed page hides names that aren't in TaxDome too.
+    post_list(server, "2024", "c.csv", b"Name\nPat Newman\nSam Other\n")
+    post_multi(server, "/clients/remove", [("name", "Pat Newman"), ("back", "/not-billed?year=2024")])
+    nb = get(server + "/not-billed?year=2024")
+    assert "Sam Other" in nb and "Pat Newman" not in nb.split("Removed")[0].split("<tbody>")[1]
+
+    post_multi(server, "/clients/restore", [("name", "Acme Bakery, LLC"), ("name", "Rivera Maria"),
+                                             ("name", "Pat Newman")])
+    assert "Removed clients" not in get(server + "/clients")
+    assert conn.execute("SELECT SUM(total_cents) FROM invoice_view").fetchone()[0] == billed_before
+    conn.close()

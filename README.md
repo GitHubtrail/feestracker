@@ -81,6 +81,13 @@ year's list who has no TaxDome invoice for that tax year.
 - Client lists are kept on their own. Saving one never changes your clients, invoices,
   payments or bad debts, and saving a year again only replaces that year's list.
 
+## Remove clients you don't want
+
+On **All clients** or **Not billed**, tick the clients (the box at the top ticks them all) and
+press **Remove ticked clients**. They are hidden from every page and total, and stay hidden
+after a new TaxDome import. Nothing is deleted: they are listed under **Removed clients** at
+the bottom of All clients, where you can tick them and put them back.
+
 ## How the numbers are worked out
 
 - **Billed** is the invoice's services minus its discounts.

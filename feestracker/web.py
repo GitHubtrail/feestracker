@@ -48,6 +48,7 @@ h1 { font-size:24px; margin:4px 0 16px } h2 { font-size:19px; margin:28px 0 10px
 table { border-collapse:collapse; width:100% }
 th, td { padding:8px 12px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top }
 th { font-size:13px; color:var(--muted); font-weight:600; white-space:nowrap }
+td.tick, th.tick { width:1%; padding-right:0 }
 td.n, th.n { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums }
 tr:last-child td { border-bottom:0 } tfoot td { font-weight:650 }
 form.inline { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:0 0 14px }
@@ -279,20 +280,51 @@ def paid(conn: sqlite3.Connection, year: str) -> bytes:
     return page("Who paid", body, "/paid")
 
 
-def all_clients(conn: sqlite3.Connection, q: str) -> bytes:
+def tick(name: str) -> str:
+    return f"<td class=tick><input type=checkbox name=name value=\"{escape(name)}\"></td>"
+
+
+TICK_ALL = ("<th class=tick><input type=checkbox title='Tick all' "
+            "onclick=\"for (const b of this.closest('table').querySelectorAll('tbody input[type=checkbox]'))"
+            " b.checked = this.checked\"></th>")
+
+
+def remove_form(table: str, back: str) -> str:
+    """A table of clients with tick boxes and one button to remove the ticked ones."""
+    return f"""<form method=post action="/clients/remove">
+    <input type=hidden name=back value="{escape(back)}">
+    {table}
+    <p><button>Remove ticked clients</button> <span class="small muted">They are hidden from every
+      page and total, and stay hidden after a new import. You can put them back on All clients.</span></p>
+    </form>"""
+
+
+def all_clients(conn: sqlite3.Connection, q: str, message: str = "") -> bytes:
     rows = "".join(
-        f"<tr><td>{client_link(c['client'])}</td><td class=n>{c['invoices']}</td>"
+        f"<tr>{tick(c['client'])}<td>{client_link(c['client'])}</td><td class=n>{c['invoices']}</td>"
         f"<td class=n>{money(c['billed'])}</td><td class='n ok'>{money(c['paid'])}</td>"
         f"<td class='n {'owe' if c['owed'] else 'muted'}'>{money(c['owed'])}</td></tr>"
         for c in reports.clients(conn, q)
     )
+    back = "/clients" + (f"?q={quote(q)}" if q else "")
+    table = f"""<div class=wrap><table><thead><tr>{TICK_ALL}<th>Client</th><th class=n>Invoices</th>
+      <th class=n>Billed</th><th class=n>Paid</th><th class=n>Owes</th></tr></thead>
+      <tbody>{rows or '<tr><td colspan=6 class=muted>No clients found.</td></tr>'}</tbody></table></div>"""
+    removed = db.removed_clients(conn)
+    removed_html = ""
+    if removed:
+        items = "".join(f"<tr>{tick(n)}<td>{escape(n)}</td></tr>" for n in removed)
+        removed_html = f"""<h2>Removed clients ({len(removed)})</h2>
+    <form method=post action="/clients/restore">
+    <div class=wrap><table><thead><tr>{TICK_ALL}<th>Client</th></tr></thead><tbody>{items}</tbody></table></div>
+    <p><button>Put ticked clients back</button></p></form>"""
     body = f"""<h1>All clients</h1>
+    {message}
     <form class=inline method=get action="/clients">
       <input type=search name=q value="{escape(q)}" placeholder="Search by name" autofocus>
       <button>Search</button></form>
-    <div class=wrap><table><thead><tr><th>Client</th><th class=n>Invoices</th><th class=n>Billed</th>
-      <th class=n>Paid</th><th class=n>Owes</th></tr></thead>
-      <tbody>{rows or '<tr><td colspan=5 class=muted>No clients found.</td></tr>'}</tbody></table></div>"""
+    {remove_form(table, back)}
+    {removed_html}"""
     return page("All clients", body, "/clients")
 
 
@@ -629,7 +661,7 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
         nb = reports.not_billed(conn, year)
         counts = {k: sum(1 for r in nb["rows"] if r["kind"] == k) for k in KIND_NOTE}
         rows = "".join(
-            f"<tr><td>{client_link(r['client']) if r['client'] else escape(r['name'])}"
+            f"<tr>{tick(r['client'] or r['name'])}<td>{client_link(r['client']) if r['client'] else escape(r['name'])}"
             + (f"<div class='small muted'>On your list as {escape(r['name'])}</div>"
                if r["client"] and r["client"].lower() != r["name"].lower() else "")
             + f"</td><td class=small>{KIND_NOTE[r['kind']]}"
@@ -654,10 +686,10 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
       “TY {escape(year)}”, “{escape(year)} tax return”). If none is written, it counts for the year before
       the invoice date, because {escape(year)} returns are usually billed in {int(year) + 1}.
       <a href="/not-billed.csv?year={quote(year)}">Download this list (CSV)</a></p>
-    <div class=wrap><table><thead><tr><th>Client</th><th>Why it's here</th><th>Tax years billed</th>
-      <th>Last invoice</th><th class=n>Owes now</th></tr></thead>
-      <tbody>{rows or '<tr><td colspan=5 class=muted>Everyone on this list was billed.</td></tr>'}</tbody>
-    </table></div>"""
+    {remove_form(f"""<div class=wrap><table><thead><tr>{TICK_ALL}<th>Client</th><th>Why it's here</th>
+      <th>Tax years billed</th><th>Last invoice</th><th class=n>Owes now</th></tr></thead>
+      <tbody>{rows or '<tr><td colspan=6 class=muted>Everyone on this list was billed.</td></tr>'}</tbody>
+    </table></div>""", "/not-billed?year=" + quote(year))}"""
     options = "".join(f"<option{' selected' if y == str(today.year - 1) else ''}>{y}</option>"
                       for y in tax_year_options(today))
     upload = f"""<h2>Add or replace a client list</h2>
@@ -854,6 +886,9 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
             if path == "/not-billed":
                 self._save_list()
                 return
+            if path in ("/clients/remove", "/clients/restore"):
+                self._remove_clients(path)
+                return
             if path in ("/data/bring-back", "/update"):
                 self._data_action(path)
                 return
@@ -905,6 +940,23 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
             back = form.get("back", "/")
             if not back.startswith("/") or back.startswith("//"):
                 back = "/"
+            self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
+
+        def _remove_clients(self, path: str):
+            length = min(int(self.headers.get("Content-Length") or 0), 1_000_000)
+            fields = parse_qs(self.rfile.read(length).decode("utf-8"))
+            names = fields.get("name", [])
+            back = (fields.get("back") or ["/clients"])[0]
+            if not back.startswith("/") or back.startswith("//"):
+                back = "/clients"
+            conn = db.connect(db_path)
+            try:
+                if path == "/clients/remove":
+                    db.remove_clients(conn, names)
+                else:
+                    db.restore_clients(conn, names)
+            finally:
+                conn.close()
             self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
 
         def _save_list(self):

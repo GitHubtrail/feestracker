@@ -75,6 +75,13 @@ CREATE TABLE IF NOT EXISTS manual_payments (
 );
 CREATE INDEX IF NOT EXISTS manual_payments_invoice ON manual_payments(invoice_number);
 
+-- Clients you removed. Their invoices are left out of every page and total, and
+-- stay left out after a new TaxDome import, until you put them back.
+CREATE TABLE IF NOT EXISTS removed_clients (
+    name       TEXT PRIMARY KEY,
+    removed_at TEXT NOT NULL
+);
+
 -- What the reports read: each invoice with the payments you entered added to
 -- what TaxDome says was paid, and its unpaid balance split into money still
 -- owed and money written off as bad debt. Recreated on every start so older
@@ -97,7 +104,8 @@ WITH m AS (SELECT invoice_number, SUM(amount_cents) AS cents, MAX(paid_on) AS la
               b.invoice_number IS NOT NULL AS bad_debt
        FROM invoices i
        LEFT JOIN m ON m.invoice_number = i.number
-       LEFT JOIN bad_debts b ON b.invoice_number = i.number)
+       LEFT JOIN bad_debts b ON b.invoice_number = i.number
+       WHERE i.client NOT IN (SELECT name FROM removed_clients))
 SELECT v.*,
        -- What was paid toward the invoice itself, so billed always equals
        -- collected + owed + written off. Anything paid above the invoice amount
@@ -269,3 +277,22 @@ def client_list_names(conn: sqlite3.Connection, year: str) -> list[str]:
 def delete_client_list(conn: sqlite3.Connection, year: str) -> None:
     with conn:
         conn.execute("DELETE FROM client_lists WHERE year = ?", (year,))
+
+
+def remove_clients(conn: sqlite3.Connection, names: Iterable[str]) -> int:
+    """Hide clients from every page. Nothing is deleted, so they can be put back."""
+    now = datetime.now().isoformat(timespec="seconds")
+    with conn:
+        return conn.executemany(
+            "INSERT OR IGNORE INTO removed_clients (name, removed_at) VALUES (?, ?)",
+            [(n, now) for n in {n.strip() for n in names} if n]).rowcount
+
+
+def restore_clients(conn: sqlite3.Connection, names: Iterable[str]) -> int:
+    with conn:
+        return conn.executemany("DELETE FROM removed_clients WHERE name = ?",
+                                [(n,) for n in set(names)]).rowcount
+
+
+def removed_clients(conn: sqlite3.Connection) -> list[str]:
+    return [r[0] for r in conn.execute("SELECT name FROM removed_clients ORDER BY name COLLATE NOCASE")]
