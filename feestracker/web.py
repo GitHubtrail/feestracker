@@ -9,7 +9,9 @@ import csv
 import email.parser
 import email.policy
 import io
+import os
 import re
+import socket
 import sqlite3
 from datetime import date
 from html import escape
@@ -18,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
-from . import db, reports, storage
+from . import __version__, db, reports, storage
 from .clientlists import ListError, looks_like_client_list, names_from_text, read_names
 from .taxdome import ImportError_, format_cents, read_invoices
 
@@ -108,7 +110,8 @@ def page(title: str, body: str, active: str = "") -> bytes:
         '<meta name=viewport content="width=device-width,initial-scale=1">'
         f"<title>{escape(title)} · Fees Tracker</title><style>{STYLE}</style></head>"
         f"<body><header><nav><b>Fees Tracker</b>{links}</nav></header>"
-        f"<main>{body}</main></body></html>"
+        f"<main>{body}<p class='small muted' style='margin-top:40px'>Fees Tracker version {__version__}</p>"
+        "</main></body></html>"
     ).encode("utf-8")
 
 
@@ -1102,6 +1105,26 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
     return Handler
 
 
+class _Server(ThreadingHTTPServer):
+    # On Windows, address reuse lets a second copy share a port that an older copy,
+    # still running, keeps answering on. Never share: take a free port instead.
+    allow_reuse_address = os.name != "nt"
+
+
+def _in_use(host: str, port: int) -> bool:
+    with socket.socket() as s:
+        s.settimeout(0.3)
+        return s.connect_ex((host, port)) == 0
+
+
 def serve(db_path: Path, host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
+    """Start the app on `port`, or on the next free port if another copy is already running."""
     db.connect(db_path).close()
-    return ThreadingHTTPServer((host, port), make_handler(db_path))
+    for p in range(port, port + 20):
+        if _in_use(host, p):
+            continue
+        try:
+            return _Server((host, p), make_handler(db_path))
+        except OSError:
+            continue
+    return _Server((host, 0), make_handler(db_path))

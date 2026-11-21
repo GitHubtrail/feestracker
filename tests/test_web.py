@@ -345,3 +345,19 @@ def test_guess_tax_year():
 def test_other_files_still_get_the_bills_error(server):
     status, html = upload(server, b"Foo,Bar\n1,2\n", "x.csv")
     assert status == 400 and "Missing columns" in html
+
+
+def test_second_copy_takes_a_free_port_and_shows_its_version(tmp_path):
+    from feestracker import __version__
+    first = web.serve(tmp_path / "a.db", port=0)
+    port = first.server_address[1]
+    threading.Thread(target=first.serve_forever, daemon=True).start()
+    second = web.serve(tmp_path / "b.db", port=port)
+    try:
+        assert second.server_address[1] != port
+        threading.Thread(target=second.serve_forever, daemon=True).start()
+        assert f"version {__version__}" in get(f"http://127.0.0.1:{second.server_address[1]}/")
+    finally:
+        for s in (first, second):
+            s.shutdown()
+            s.server_close()
