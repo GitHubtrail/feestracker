@@ -320,35 +320,59 @@ def paid(conn: sqlite3.Connection, year: str) -> bytes:
 def entered_payments(conn: sqlite3.Connection) -> list[dict]:
     """Payments typed into Fees Tracker (not in TaxDome), newest first."""
     return [dict(r) for r in conn.execute(
-        """SELECT m.id, m.invoice_number, m.paid_on, m.amount_cents, m.note, m.entered_at, v.client
+        """SELECT m.id, m.invoice_number, m.paid_on, m.amount_cents, m.note, m.entered_at, v.client,
+                  v.taxdome_paid_cents
            FROM manual_payments m JOIN invoice_view v ON v.number = m.invoice_number
-           ORDER BY m.entered_at DESC, m.id DESC""")]
+           ORDER BY v.taxdome_paid_cents = 0, m.entered_at DESC, m.id DESC""")]
+
+
+def also_in_taxdome(rows: list[dict]) -> list[dict]:
+    """Payments you entered on invoices that TaxDome now shows a payment on too:
+    often the same payment, recorded in TaxDome after you entered it here."""
+    return [r for r in rows if r["taxdome_paid_cents"] > 0]
 
 
 def entered_note(conn: sqlite3.Connection) -> str:
     rows = entered_payments(conn)
     if not rows:
         return ""
+    twice = also_in_taxdome(rows)
+    warn = (f"<div class='small warn'><a href='/entered'>{count(len(twice), 'payment')} you entered "
+            f"may now be in TaxDome too</a></div>" if twice else "")
     return (f"<div class='small muted'>includes <a href='/entered'>{money(sum(r['amount_cents'] for r in rows))} "
-            f"you entered here</a></div>")
+            f"you entered here</a></div>{warn}")
 
 
 def entered_page(conn: sqlite3.Connection) -> bytes:
     rows = entered_payments(conn)
-    body_rows = "".join(
-        f"<tr><td>{client_link(r['client'])}</td><td>{escape(r['invoice_number'])}</td>"
-        f"<td class='n ok'>{money(r['amount_cents'])}</td><td>{escape(r['paid_on'])}</td>"
-        f"<td class=muted>{escape(r['entered_at'][:16].replace('T', ' '))}</td>"
-        f"<td class='small muted'>{escape(r['note'])}</td></tr>"
-        for r in rows)
+    twice = also_in_taxdome(rows)
+
+    def row(r: dict) -> str:
+        flag = (f"<div class='small warn'>TaxDome shows {money(r['taxdome_paid_cents'])} paid on this invoice "
+                "too. If it's the same payment, delete yours.</div>" if r["taxdome_paid_cents"] > 0 else "")
+        return (
+            f"<tr><td>{client_link(r['client'])}{flag}</td><td>{escape(r['invoice_number'])}</td>"
+            f"<td class='n ok'>{money(r['amount_cents'])}</td><td>{escape(r['paid_on'])}</td>"
+            f"<td class=muted>{escape(r['entered_at'][:16].replace('T', ' '))}</td>"
+            f"<td class='small muted'>{escape(r['note'])}</td>"
+            f"<td><form class=act method=post action='/payment'><input type=hidden name=action value=delete>"
+            f"<input type=hidden name=id value='{r['id']}'><input type=hidden name=back value='/entered'>"
+            f"<button>Delete</button></form></td></tr>")
+
+    note = ""
+    if twice:
+        note = (f"<div class='note'><b>{count(len(twice), 'payment')} ({money(sum(r['amount_cents'] for r in twice))}) "
+                "may be counted twice.</b> TaxDome now shows a payment on those invoices as well, so they are "
+                "listed first. If TaxDome's payment is the same one you entered, delete yours.</div>")
     body = f"""<h1>Payments you entered</h1>
-    <p class=muted>Payments recorded in Fees Tracker with Record payment or the tick boxes. They are
-      not in TaxDome, so TaxDome's own totals don't include them. To undo one, open the client.</p>
+    {note}
+    <p class=muted>Payments recorded in Fees Tracker with Record payment, the tick boxes or a bill outside
+      TaxDome. They are not in TaxDome, so TaxDome's own totals don't include them.</p>
     <div class=wrap><table><thead><tr><th>Client</th><th>Invoice</th><th class=n>Amount</th>
-      <th>Paid on</th><th>Entered</th><th>Note</th></tr></thead>
-      <tbody>{body_rows or '<tr><td colspan=6 class=muted>No payments entered yet.</td></tr>'}</tbody>
+      <th>Paid on</th><th>Entered</th><th>Note</th><th></th></tr></thead>
+      <tbody>{''.join(row(r) for r in rows) or '<tr><td colspan=7 class=muted>No payments entered yet.</td></tr>'}</tbody>
       <tfoot><tr><td>Total ({count(len(rows), 'payment')})</td><td></td>
-      <td class='n ok'>{money(sum(r['amount_cents'] for r in rows))}</td><td colspan=3></td></tr></tfoot>
+      <td class='n ok'>{money(sum(r['amount_cents'] for r in rows))}</td><td colspan=4></td></tr></tfoot>
     </table></div>"""
     return page("Payments you entered", body, "/paid")
 
@@ -595,9 +619,10 @@ def paid_cell(conn: sqlite3.Connection, inv: dict, client: str) -> str:
             f"<input type=hidden name=id value='{p['id']}'>"
             f"<input type=hidden name=back value='{escape(back)}'><button>Delete</button></form></div>"
         )
-    if inv["status"] == "paid":
-        out += ("<div class='small warn'>TaxDome now shows this invoice as paid. If that includes "
-                "the payment you entered here, delete yours so it isn't counted twice.</div>")
+    if inv["taxdome_paid_cents"] > 0:
+        out += (f"<div class='small warn'>TaxDome now shows {money(inv['taxdome_paid_cents'])} paid on this "
+                "invoice too. If that includes the payment you entered here, delete yours so it isn't "
+                "counted twice.</div>")
     return out
 
 

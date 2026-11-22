@@ -512,3 +512,18 @@ def test_bills_outside_taxdome(server, tmp_path):
     post_multi(server, "/outside/delete", [("number", number)])
     assert db.outside_bills(conn) == []
     assert conn.execute("SELECT SUM(total_cents) FROM invoice_view").fetchone()[0] == before[0]
+
+
+def test_entered_payment_also_in_taxdome_is_flagged(server, tmp_path):
+    from feestracker import db
+    upload(server, FIXTURE.read_bytes())
+    conn = db.connect(tmp_path / "web.db")
+    inv = conn.execute("SELECT number, client FROM invoice_view WHERE taxdome_paid_cents > 0 LIMIT 1").fetchone()
+    db.add_payment(conn, inv["number"], 10000, "2026-01-05", "Zelle")
+    assert "may now be in TaxDome too" in get(server + "/")
+    html = get(server + "/entered")
+    assert "1 payment ($100.00) may be counted twice" in html and "Delete" in html
+    assert "paid on this invoice too" in get(server + "/client?name=" + inv["client"].replace(" ", "+").replace("&", "%26").replace(",", "%2C"))
+    pid = conn.execute("SELECT id FROM manual_payments").fetchone()[0]
+    assert post_multi(server, "/payment", [("action", "delete"), ("id", str(pid)), ("back", "/entered")]) == 303
+    assert "may now be in TaxDome too" not in get(server + "/")
