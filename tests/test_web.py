@@ -413,3 +413,31 @@ def test_inactive_from_a_year(server, tmp_path):
     assert "Inactive from this tax year" in get(server + back)
     assert post_multi(server, "/clients/inactive", [("name", "Rivera Maria"), ("from_year", "1999")]) == 400
     conn.close()
+
+
+def test_inactive_from_all_clients(server):
+    upload(server, FIXTURE.read_bytes())
+    html = get(server + "/clients")
+    assert "No longer my client from" in html and "<option selected>2025</option>" in html
+    post_multi(server, "/clients/inactive", [("name", "Rivera Maria"), ("name", "Chen & Sons Inc"),
+                                             ("from_year", "2025"), ("back", "/clients")])
+    assert get(server + "/clients").count("inactive from 2025") == 2
+    post_multi(server, "/clients/inactive", [("name", "Rivera Maria"), ("from_year", "2025"), ("active", "1")])
+    assert get(server + "/clients").count("inactive from 2025") == 1
+
+
+def test_paid_in_full_and_bad_debt_for_ticked_clients(server, tmp_path):
+    upload(server, FIXTURE.read_bytes())
+    html = get(server + "/owes")
+    assert "Paid in full" in html and "Bad debt" in html and "Ticked clients" in html
+    assert post_multi(server, "/clients/paid", [("name", "Rivera Maria"), ("back", "/owes")]) == 303
+    conn = db.connect(tmp_path / "web.db")
+    owed = lambda c: conn.execute("SELECT SUM(owed_cents) FROM invoice_view WHERE client = ?", (c,)).fetchone()[0]
+    assert owed("Rivera Maria") == 0
+    assert "Marked paid in full" in get(server + "/entered")
+    post_multi(server, "/clients/bad-debt", [("name", "Acme Bakery, LLC"), ("back", "/owes")])
+    assert owed("Acme Bakery, LLC") == 0
+    assert conn.execute("SELECT SUM(written_off_cents) FROM invoice_view WHERE client = 'Acme Bakery, LLC'"
+                        ).fetchone()[0] > 0
+    assert "Nobody owes anything here" in get(server + "/owes")
+    conn.close()
