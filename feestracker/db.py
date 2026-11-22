@@ -108,6 +108,21 @@ CREATE TABLE IF NOT EXISTS inactive_clients (
     marked_at TEXT NOT NULL
 );
 
+-- People billed on another client's invoice, usually their S Corp's: they count
+-- as billed for a tax year whenever that company has an invoice for it.
+CREATE TABLE IF NOT EXISTS billed_with (
+    person    TEXT PRIMARY KEY,
+    company   TEXT NOT NULL,
+    linked_at TEXT NOT NULL
+);
+
+-- Clients whose returns you do for free and never bill, so they never show as
+-- not billed. Their invoices, if any, stay as they are.
+CREATE TABLE IF NOT EXISTS free_clients (
+    name      TEXT PRIMARY KEY,
+    marked_at TEXT NOT NULL
+);
+
 -- Clients you removed. Their invoices are left out of every page and total, and
 -- stay left out after a new TaxDome import, until you put them back.
 CREATE TABLE IF NOT EXISTS removed_clients (
@@ -355,6 +370,126 @@ def not_matches(conn: sqlite3.Connection) -> dict[str, frozenset[str]]:
     for name, client in conn.execute("SELECT list_name, client FROM not_matches"):
         out.setdefault(name, set()).add(client)
     return {k: frozenset(v) for k, v in out.items()}
+
+
+def link_billed_with(conn: sqlite3.Connection, people: Iterable[str], company: str) -> int:
+    """Note that these people are billed on the company's invoice."""
+    now = datetime.now().isoformat(timespec="seconds")
+    rows = [(p, company, now) for p in set(people) if p.strip() and p != company]
+    with conn:
+        conn.executemany("INSERT OR REPLACE INTO billed_with (person, company, linked_at) VALUES (?, ?, ?)", rows)
+    return len(rows)
+
+
+def unlink_billed_with(conn: sqlite3.Connection, people: Iterable[str]) -> None:
+    with conn:
+        conn.executemany("DELETE FROM billed_with WHERE person = ?", [(p,) for p in set(people)])
+
+
+def billed_with(conn: sqlite3.Connection) -> dict[str, str]:
+    return {r[0]: r[1] for r in conn.execute("SELECT person, company FROM billed_with ORDER BY person")}
+
+
+def set_free(conn: sqlite3.Connection, names: Iterable[str], free: bool = True) -> None:
+    """Mark clients whose returns you do for free (or, with free=False, undo it)."""
+    now = datetime.now().isoformat(timespec="seconds")
+    with conn:
+        if free:
+            conn.executemany("INSERT OR IGNORE INTO free_clients (name, marked_at) VALUES (?, ?)",
+                             [(n, now) for n in set(names) if n.strip()])
+        else:
+            conn.executemany("DELETE FROM free_clients WHERE name = ?", [(n,) for n in set(names)])
+
+
+def free_clients(conn: sqlite3.Connection) -> list[str]:
+    return [r[0] for r in conn.execute("SELECT name FROM free_clients ORDER BY name")]
+
+
+# ---------------------------------------------------------------- bills outside TaxDome
+
+OUTSIDE = "outside TaxDome"   # the status these bills carry
+OUTSIDE_PREFIX = "OUT-"       # their numbers; TaxDome's are digits only, so an import never touches them
+
+
+def is_outside(number: str) -> bool:
+    return number.startswith(OUTSIDE_PREFIX)
+
+
+def _outside_rows(client: str, tax_year: str, amount_cents: int, note: str) -> tuple[str, str]:
+    title = f"Tax year {tax_year}" + (f" - {note.strip()}" if note.strip() else "")
+    return title, f"Billed outside TaxDome. {title}"
+
+
+def add_outside_bill(conn: sqlite3.Connection, client: str, tax_year: str, amount_cents: int, billed_on: str,
+                     note: str = "", received_cents: int = 0, received_on: str = "") -> str:
+    """Add a bill you sent outside TaxDome, and what you already received for it.
+    It then counts everywhere like a TaxDome invoice. Returns its number."""
+    client = " ".join(client.split())
+    if not client:
+        raise ValueError("client name is missing")
+    if amount_cents < 0 or received_cents < 0:
+        raise ValueError("amounts can't be negative")
+    title, description = _outside_rows(client, tax_year, amount_cents, note)
+    with conn:
+        last = conn.execute(
+            "SELECT MAX(CAST(substr(number, ?) AS INTEGER)) FROM invoices WHERE number LIKE ?",
+            (len(OUTSIDE_PREFIX) + 1, OUTSIDE_PREFIX + "%")).fetchone()[0] or 0
+        number = f"{OUTSIDE_PREFIX}{last + 1}"
+        conn.execute(
+            """INSERT INTO invoices (number, status, client, description, created_at, invoice_date,
+                   payment_methods, total_cents, paid_cents, balance_cents)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
+            (number, OUTSIDE, client, description, datetime.now().isoformat(timespec="seconds"),
+             billed_on, OUTSIDE, amount_cents, amount_cents))
+        conn.execute(
+            """INSERT INTO line_items (invoice_number, kind, position, title, amount_cents, quantity, total_cents)
+               VALUES (?, 'service', 1, ?, ?, '1', ?)""", (number, title, amount_cents, amount_cents))
+        if received_cents:
+            conn.execute(
+                """INSERT INTO manual_payments (invoice_number, paid_on, amount_cents, note, entered_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (number, received_on or billed_on, received_cents, "Outside TaxDome",
+                 datetime.now().isoformat(timespec="seconds")))
+    return number
+
+
+def update_outside_bill(conn: sqlite3.Connection, number: str, client: str, tax_year: str, amount_cents: int,
+                        billed_on: str, note: str = "") -> bool:
+    if not is_outside(number) or amount_cents < 0:
+        return False
+    client = " ".join(client.split())
+    title, description = _outside_rows(client, tax_year, amount_cents, note)
+    with conn:
+        n = conn.execute(
+            """UPDATE invoices SET client = ?, description = ?, invoice_date = ?, total_cents = ?,
+                   balance_cents = ? WHERE number = ?""",
+            (client, description, billed_on, amount_cents, amount_cents, number)).rowcount
+        conn.execute("UPDATE line_items SET title = ?, amount_cents = ?, total_cents = ? WHERE invoice_number = ?",
+                     (title, amount_cents, amount_cents, number))
+    return bool(n)
+
+
+def delete_outside_bill(conn: sqlite3.Connection, number: str) -> None:
+    if not is_outside(number):
+        return
+    with conn:
+        conn.execute("DELETE FROM manual_payments WHERE invoice_number = ?", (number,))
+        conn.execute("DELETE FROM bad_debts WHERE invoice_number = ?", (number,))
+        conn.execute("DELETE FROM invoices WHERE number = ?", (number,))
+
+
+def outside_bills(conn: sqlite3.Connection) -> list[dict]:
+    """Bills outside TaxDome, newest first, with the tax year and note split back out."""
+    out = []
+    for r in conn.execute(
+            """SELECT v.*, l.title FROM invoice_view v JOIN line_items l ON l.invoice_number = v.number
+               WHERE v.number LIKE ? ORDER BY v.invoice_date DESC, CAST(substr(v.number, ?) AS INTEGER) DESC""",
+            (OUTSIDE_PREFIX + "%", len(OUTSIDE_PREFIX) + 1)):
+        d = dict(r)
+        head, _, note = d["title"].partition(" - ")
+        d["tax_year"], d["note"] = head.removeprefix("Tax year "), note
+        out.append(d)
+    return out
 
 
 def mark_not_filed(conn: sqlite3.Connection, year: str, names: Iterable[str], filed: bool = False) -> None:

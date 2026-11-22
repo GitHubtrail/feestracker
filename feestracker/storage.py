@@ -143,6 +143,15 @@ def bring_back_adjustments(conn: sqlite3.Connection, old: Path) -> dict[str, int
         tables = {r[0] for r in conn.execute("SELECT name FROM old.sqlite_master WHERE type='table'")}
         marks = payments = 0
         with conn:
+            if "invoices" in tables:
+                # Bills outside TaxDome live only in this app, so bring them along first.
+                conn.execute("""INSERT OR IGNORE INTO invoices SELECT * FROM old.invoices
+                                WHERE number LIKE 'OUT-%'""")
+                conn.execute("""INSERT OR IGNORE INTO line_items SELECT * FROM old.line_items
+                                WHERE invoice_number LIKE 'OUT-%'""")
+            for table in ("billed_with", "free_clients", "name_matches", "not_matches", "not_filed", "inactive_clients"):
+                if table in tables:
+                    conn.execute(f"INSERT OR IGNORE INTO {table} SELECT * FROM old.{table}")
             if "bad_debts" in tables:
                 marks = conn.execute(
                     """INSERT OR IGNORE INTO bad_debts (invoice_number, marked_at, note)
