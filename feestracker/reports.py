@@ -9,6 +9,7 @@ from typing import Iterable
 from datetime import date
 
 from . import db
+from . import clientlists
 from .clientlists import Matcher
 
 
@@ -400,8 +401,9 @@ def not_billed(conn: sqlite3.Connection, year: str) -> dict:
     years = client_tax_years(conn)
     owed = {r["client"]: r["owed"] for r in conn.execute(
         "SELECT client, SUM(owed_cents) AS owed FROM invoice_view GROUP BY client")}
-    last = {r["client"]: r["last"] for r in conn.execute(
-        "SELECT client, MAX(invoice_date) AS last FROM invoice_view GROUP BY client")}
+    last, last_total = {}, {}
+    for r in conn.execute("SELECT client, invoice_date, total_cents FROM invoice_view ORDER BY invoice_date"):
+        last[r["client"]], last_total[r["client"]] = r["invoice_date"], r["total_cents"]
     taxdome = Matcher(list(years))
     removed = set(db.removed_clients(conn))
     confirmed = db.name_matches(conn)
@@ -441,8 +443,77 @@ def not_billed(conn: sqlite3.Connection, year: str) -> dict:
         kind = "in_taxdome" if client else ("maybe" if m.maybe else "never")
         rows.append({"name": name, "client": client, "maybe": m.found if kind == "maybe" else None,
                      "kind": kind, "tax_years": billed, "last_invoice": (last.get(client) or "")[:10],
-                     "owed": owed.get(client, 0) if client else 0, "company": company})
+                     "owed": owed.get(client, 0) if client else 0, "company": company,
+                     "last_total": last_total.get(client, 0) if client else 0})
     order = {"in_taxdome": 0, "maybe": 1, "never": 2}
     rows.sort(key=lambda r: (order[r["kind"]], r["name"].lower()))
     off.sort(key=lambda r: (r["why"], r["name"].lower()))
     return {"year": year, "listed": len(names), "rows": rows, "off": off}
+
+
+def _first_last(name: str) -> tuple[str, str]:
+    """The filer's first and last name, in lower case ("" when there aren't two)."""
+    filer = re.split(r"\s+and\s+|\s*&\s*", name, maxsplit=1, flags=re.I)[0]
+    w = clientlists.ordered_words(filer)
+    return (w[0], w[-1]) if len(w) >= 2 else ("", "")
+
+
+def suggestions(conn: sqlite3.Connection, year: str, rows: list[dict]) -> dict[str, dict]:
+    """What each not-billed return most likely is, from what the data shows.
+
+    Keyed by the row's ATX name. Each has an "action" ("with", "free" or "bill"),
+    a plain "why", the "company" (for "with") and "sure" when it is safe to accept
+    without looking: the person is named on a relative's invoice for that year, or
+    is the only person or company with their last name billed that year.
+    """
+    years = client_tax_years(conn)
+    billed = [c for c, ys in years.items() if year in ys]
+    texts: dict[str, set[str]] = {}
+    for r in conn.execute("SELECT i.client, i.description, GROUP_CONCAT(l.title, ' ') AS titles "
+                          "FROM invoice_view i LEFT JOIN line_items l ON l.invoice_number = i.number "
+                          "AND l.kind = 'service' GROUP BY i.number"):
+        found = re.findall(r"[a-z]+", f"{r['description'] or ''} {r['titles'] or ''}".lower())
+        texts.setdefault(r["client"], set()).update(found)
+    by_word: dict[str, list[str]] = {}
+    for c in years:
+        for w in clientlists.words(c):
+            by_word.setdefault(w, []).append(c)
+    lists = {y: set(db.client_list_names(conn, y)) for y in [l["year"] for l in db.client_lists(conn)]}
+    out: dict[str, dict] = {}
+    for r in rows:
+        name, own = r["name"], r.get("client")
+        first, last = _first_last(name)
+        found = None
+        if first and not clientlists.is_company(name) and len(last) >= 3:
+            named = [c for c in billed if c != own and last in clientlists.words(c)
+                     and len(first) >= 3 and first in texts.get(c, set())]
+            same_last = [c for c in by_word.get(last, []) if c != own]
+            people = [c for c in same_last if c in billed and not clientlists.is_company(c)]
+            firms = [c for c in same_last if c in billed and clientlists.is_company(c)
+                     and last not in clientlists.GENERIC_WORDS and len(last) >= 4]
+            if len(named) == 1:
+                found = {"company": named[0], "sure": True,
+                         "why": f"{first.title()} is named on {named[0]}’s invoice."}
+            elif len(firms) == 1 and len(same_last) <= 3:
+                found = {"company": firms[0], "sure": len(same_last) == 1,
+                         "why": f"{firms[0]} has a {year} invoice and the name {last.title()}."}
+            elif len(people) == 1 and len(same_last) <= 2:
+                found = {"company": people[0], "sure": len(same_last) == 1,
+                         "why": f"{people[0]} has a {year} invoice and the same last name. Family?"}
+        if (found and not own and not clientlists.is_company(found["company"])
+                and any(w == first or (min(len(w), len(first)) >= 3 and (w.startswith(first) or first.startswith(w)))
+                        for w in clientlists.words(found["company"]))):
+            # Same first and last name: the same client spelled another way, not a relative.
+            out[name] = {"action": "same", "client": found.pop("company"), **found,
+                         "why": "Looks like the same client, spelled differently in TaxDome."}
+        elif found:
+            out[name] = {"action": "with", **found}
+        elif r["kind"] == "in_taxdome" and r.get("tax_years"):
+            out[name] = {"action": "bill", "sure": False,
+                         "why": f"Billed for {', '.join(r['tax_years'])}, but nothing yet for {year}."}
+        elif r["kind"] == "never":
+            on = [y for y in sorted(lists) if name in lists[y]]
+            out[name] = {"action": "free", "sure": False,
+                         "why": "Never invoiced in TaxDome" + (
+                             f", and on your ATX lists for {', '.join(on)}" if len(on) > 1 else "") + "."}
+    return out

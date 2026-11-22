@@ -71,6 +71,9 @@ textarea { width:100%; padding:10px; border-radius:8px; border:1px solid var(--l
         border-radius:8px; padding:10px 14px; margin:0 0 16px }
 .small { font-size:14px }
 form.act { margin:6px 0 0 }
+.choices form { display:inline-block; margin:0 6px 8px 0 }
+.choices button { font-size:15px; padding:9px 16px; background:var(--card); color:var(--accent); border:1px solid var(--accent); border-radius:8px }
+.choices button.primary { background:var(--accent); color:#fff }
 form.act button { background:transparent; color:var(--accent); border:1px solid var(--line);
                   padding:2px 10px; font-size:13px }
 .pill.bad { color:var(--muted); background:var(--bg) }
@@ -868,6 +871,7 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
     table = ""
     if year:
         nb = reports.not_billed(conn, year)
+        found = reports.suggestions(conn, year, nb["rows"])
         counts = {k: sum(1 for r in nb["rows"] if r["kind"] == k) for k in KIND_NOTE}
         def row(r: dict) -> str:
             same = ""
@@ -885,6 +889,8 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
                 + (f": maybe {client_link(r['maybe'])}{same}" if r["maybe"] else "")
                 + (f"<div class='small muted'>Billed with {client_link(r['company'])}, which has no "
                    f"{escape(year)} invoice</div>" if r.get("company") else "")
+                + (f"<div class='small muted'>Best guess: {escape(found[r['name']]['why'])}</div>"
+                   if r["name"] in found and found[r["name"]]["action"] in ("with", "same") else "")
                 + f"</td><td class=muted>{escape(', '.join(r['tax_years'])) or '–'}</td>"
                 f"<td class=muted>{escape(r['last_invoice']) or '–'}</td>"
                 f"<td class='n {'owe' if r['owed'] else 'muted'}'>{money(r['owed'])}</td></tr>")
@@ -912,6 +918,7 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
       “TY {escape(year)}”, “{escape(year)} tax return”). If none is written, it counts for the year before
       the invoice date, because {escape(year)} returns are usually billed in {int(year) + 1}.
       <a href="/not-billed.csv?year={quote(year)}">Download this list (CSV)</a></p>
+    {quick_fixes_html(conn, year, nb["rows"], found)}
     {client_actions(f"""<div class=wrap><table class=list><thead><tr>{TICK_ALL}<th>Client</th><th>Why it's here</th>
       <th>Tax years billed</th><th>Last invoice</th><th class=n>Owes now</th></tr></thead>
       <tbody>{rows or '<tr><td colspan=6 class=muted>Everyone on this list was billed.</td></tr>'}</tbody>
@@ -937,6 +944,138 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
     {('<p>Tax year: ' + tabs + '</p>') if years else '<div class=note>Add your ATX list for a tax year below to see who wasn’t billed.</div>'}
     {table}
     {upload}"""
+    return page("Not billed", body, "/not-billed")
+
+
+REVIEW_ORDER = {"maybe": 0, "with": 1, "same": 1, "bill": 2, "free": 3}
+
+
+def review_queue(conn: sqlite3.Connection, year: str) -> tuple[list[dict], dict[str, dict]]:
+    """The returns still to look at one by one: sure guesses are left for the Quick fixes box."""
+    nb = reports.not_billed(conn, year)
+    found = reports.suggestions(conn, year, nb["rows"])
+    rows = [r for r in nb["rows"] if not found.get(r["name"], {}).get("sure")]
+    rows.sort(key=lambda r: (0 if r["kind"] == "maybe" else REVIEW_ORDER.get(found.get(r["name"], {}).get("action"), 4),
+                             r["name"].lower()))
+    return rows, found
+
+
+def quick_fixes_html(conn: sqlite3.Connection, year: str, rows: list[dict], found: dict[str, dict]) -> str:
+    """Returns the data settles on its own, ticked, ready to accept in one click."""
+    sure = [r for r in rows if found.get(r["name"], {}).get("sure")]
+    rest = len(rows) - len(sure)
+    review = (f"<a class=btn href='/not-billed/review?year={quote(year)}'>Go through the {rest} one by one</a>"
+              if rest else "")
+    if not sure:
+        return (f"<div class=note><b>{count(rest, 'return')} to look at.</b> Answer one at a time with one click. "
+                f"{review}</div>") if rest else ""
+    items = []
+    for r in sure:
+        f = found[r["name"]]
+        target = f.get("company") or f.get("client")
+        value = escape(f"{r['client'] or r['name']}\t{target}\t{f['action']}")
+        what = "same client as" if f["action"] == "same" else "billed with"
+        items.append(f"<tr><td class=tick><input type=checkbox name=pick value=\"{value}\" checked></td>"
+                     f"<td>{escape(r['name'])}</td><td>{what} {client_link(target)}</td>"
+                     f"<td class='small muted'>{escape(f['why'])}</td></tr>")
+    return f"""<div class=note>
+    <form method=post action="/not-billed/apply">
+    <input type=hidden name=year value="{escape(year)}">
+    <p><b>Found {count(len(sure), 'answer')} for you.</b> Untick any that are wrong, then press the button.
+      You can put them back later under “Taken off the {escape(year)} list”.</p>
+    <details><summary>Show them</summary><div class=wrap><table class=list><tbody>{''.join(items)}</tbody></table></div></details>
+    <p><button>Use these {len(sure)} answers</button>
+      {f'<span class=small style="margin-left:8px">then</span> {review}' if review else ''}</p>
+    </form></div>"""
+
+
+def review_page(conn: sqlite3.Connection, today: date, year: str, skip: int) -> bytes:
+    """One not-billed return at a time, with a best guess and one-click answers."""
+    years = [l["year"] for l in db.client_lists(conn)]
+    if year not in years:
+        return page("Not billed", "<h1>No ATX list for that year</h1><p><a href='/not-billed'>Not billed yet</a></p>")
+    queue, found = review_queue(conn, year)
+    back_list = f"/not-billed?year={quote(year)}"
+    if skip >= len(queue):
+        left = len(queue)
+        body = f"""<h1>All done for {escape(year)}</h1>
+        <p>{'Nothing left to look at.' if not left else
+            f'You skipped {count(left, "return")}. They stay on the list until they are billed in TaxDome.'}</p>
+        <p><a class=btn href="{back_list}">Back to Not billed yet</a>
+          {f'<a class=btn href="/not-billed/review?year={quote(year)}" style="margin-left:8px">Start again</a>' if left else ''}</p>"""
+        return page("Not billed", body, "/not-billed")
+    r = queue[skip]
+    key = r["client"] or r["name"]
+    guess = found.get(r["name"], {})
+    here = f"/not-billed/review?year={quote(year)}&skip={skip}"
+    nxt = f"/not-billed/review?year={quote(year)}&skip={skip + 1}"
+
+    def post(action: str, label: str, cls: str = "", extra: str = "", title: str = "") -> str:
+        return (f"<form method=post action='{action}'>"
+                f"<input type=hidden name=name value=\"{escape(key)}\">"
+                f"<input type=hidden name=year value=\"{escape(year)}\"><input type=hidden name=from_year value=\"{escape(year)}\">"
+                f"<input type=hidden name=back value=\"{escape(here)}\">{extra}"
+                f"<button class='{cls}' title='{escape(title)}'>{label}</button></form> ")
+
+    facts = []
+    if r["client"]:
+        if r["client"].lower() != r["name"].lower():
+            facts.append(f"In TaxDome as {client_link(r['client'])}")
+        else:
+            facts.append(f"In TaxDome: {client_link(r['client'])}")
+        facts.append("Tax years billed: " + (escape(", ".join(r["tax_years"])) or "none"))
+        if r["last_invoice"]:
+            facts.append(f"Last invoice {escape(r['last_invoice'])}, {money(r.get('last_total', 0))}")
+        if r["owed"]:
+            facts.append(f"<span class=owe>Owes {money(r['owed'])}</span>")
+    else:
+        facts.append("No invoices in TaxDome under this name")
+    if r.get("company"):
+        facts.append(f"Billed with {client_link(r['company'])}, which has no {escape(year)} invoice")
+
+    main = []
+    if r["maybe"]:
+        pair = escape(r["name"] + chr(9) + r["maybe"])
+        main.append(post("/not-billed/match", f"Yes, same client as {escape(r['maybe'])}", "primary",
+                         extra=f"<input type=hidden name=match value=\"{pair}\">"))
+        main.append(post("/not-billed/not-match", "Not the same", "",
+                         extra=f"<input type=hidden name=match value=\"{pair}\">"))
+    if guess.get("action") == "with":
+        main.append(post("/clients/billed-with", f"Yes, billed with {escape(guess['company'])}", "primary",
+                         extra=f"<input type=hidden name=company value=\"{escape(guess['company'])}\">"))
+    if guess.get("action") == "same":
+        pair = escape(r["name"] + chr(9) + guess["client"])
+        main.append(post("/not-billed/match", f"Yes, same client as {escape(guess['client'])}", "primary",
+                         extra=f"<input type=hidden name=match value=\"{pair}\">"))
+    free_cls = "primary" if guess.get("action") == "free" and not main else ""
+    main.append(post("/clients/free", "Free return", free_cls,
+                     title="You do their return for free and never bill them. Takes them off every year."))
+    main.append(post("/not-billed/not-filed", f"Didn't file for {escape(year)}", "",
+                     title=f"Takes them off the {year} list only"))
+    main.append(post("/clients/inactive", f"No longer my client from {escape(year)}", "",
+                     title="Leaves the Not billed list from this tax year on"))
+    companies = company_names(conn)
+    options = "".join(f"<option value=\"{escape(c)}\">" for c in companies)
+    with_other = (f"<form method=post action='/clients/billed-with' class=act>"
+                  f"<input type=hidden name=name value=\"{escape(key)}\">"
+                  f"<input type=hidden name=back value=\"{escape(here)}\">"
+                  f"<span class=split><button class=secondary>Billed with</button>"
+                  f"<input name=company list=companies placeholder='Type a client or company' aria-label='Company'>"
+                  f"</span><datalist id=companies>{options}</datalist></form>")
+    outside = (f"<a class=small href='/outside?name={quote(key)}&year={quote(year)}'>Billed outside TaxDome</a>")
+    skip_label = "Skip, I still need to bill them" if guess.get("action") == "bill" else "Skip for now"
+    body = f"""<p class=small><a href="{back_list}">← Not billed yet for {escape(year)}</a></p>
+    <h1>{skip + 1} of {len(queue)} <span class=muted style="font-weight:400">to look at for {escape(year)}</span></h1>
+    <div class=card style="max-width:760px">
+      <div style="font-size:24px;font-weight:650">{escape(r['name'])}</div>
+      <p class=muted>{' · '.join(facts)}</p>
+      {f"<div class=note><b>{'What I see' if guess.get('action') in ('bill', 'free') else 'Best guess'}:</b> {escape(guess['why'])}</div>" if guess.get('why') else ''}
+      <div class=choices style="margin-top:14px">{''.join(main)}</div>
+      {with_other}
+      <p style="margin-top:14px"><a class=btn href="{nxt}" style="background:var(--card);color:var(--accent);border:1px solid var(--accent)">{skip_label} →</a>
+        <span style="margin-left:12px">{outside}</span></p>
+    </div>
+    <p class="small muted">Every answer can be undone under “Taken off the {escape(year)} list” on the Not billed yet page.</p>"""
     return page("Not billed", body, "/not-billed")
 
 
@@ -1215,6 +1354,9 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                     self._send(import_page())
                 elif url.path == "/not-billed":
                     self._send(not_billed_page(conn, today, q.get("year", "")))
+                elif url.path == "/not-billed/review":
+                    skip = q.get("skip", "0")
+                    self._send(review_page(conn, today, q.get("year", ""), int(skip) if skip.isdigit() else 0))
                 elif url.path == "/not-billed.csv":
                     self._send(not_billed_csv(conn, q.get("year", "")), "text/csv; charset=utf-8",
                                extra={"Content-Disposition":
@@ -1256,6 +1398,9 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                 return
             if path == "/clients/inactive":
                 self._inactive()
+                return
+            if path == "/not-billed/apply":
+                self._apply_suggestions()
                 return
             if path == "/not-billed/not-filed":
                 self._not_filed()
@@ -1414,7 +1559,9 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
             length = min(int(self.headers.get("Content-Length") or 0), 1_000_000)
             fields = parse_qs(self.rfile.read(length).decode("utf-8"))
             year = (fields.get("year") or [""])[0]
-            back = "/not-billed?year=" + quote(year)
+            back = (fields.get("back") or ["/not-billed?year=" + quote(year)])[0]
+            if not back.startswith("/") or back.startswith("//"):
+                back = "/not-billed"
             if year and fields.get("name"):
                 conn = db.connect(db_path)
                 try:
@@ -1422,6 +1569,25 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                 finally:
                     conn.close()
             self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
+
+        def _apply_suggestions(self):
+            """Accept the ticked Quick fixes: billed with a relative or company, or the same client."""
+            fields = self._fields()
+            year = (fields.get("year") or [""])[0]
+            conn = db.connect(db_path)
+            try:
+                for pick in fields.get("pick", []):
+                    name, _, rest = pick.partition("\t")
+                    target, _, action = rest.partition("\t")
+                    if not name or not target:
+                        continue
+                    if action == "same":
+                        db.confirm_match(conn, name, target)
+                    elif action == "with":
+                        db.link_billed_with(conn, [name], target)
+            finally:
+                conn.close()
+            self._go("/not-billed?year=" + quote(year), "/not-billed")
 
         def _confirm_match(self, same: bool = True):
             length = min(int(self.headers.get("Content-Length") or 0), 1_000_000)

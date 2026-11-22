@@ -264,3 +264,26 @@ def test_return_name_used_when_names_differ(conn):
     assert [r["name"] for r in reports.not_billed(conn, "2025")["rows"]] == names
     db.save_aliases(conn, clientlists.read_aliases(data, "atx.csv"))
     assert reports.not_billed(conn, "2025")["rows"] == []
+
+
+def _billed(conn, number, client, when, text=""):
+    conn.execute("INSERT INTO invoices (number, status, client, description, invoice_date, total_cents,"
+                 " paid_cents, balance_cents) VALUES (?, 'paid', ?, ?, ?, 100, 100, 0)", (number, client, text, when))
+
+
+def test_suggestions_for_not_billed(conn):
+    from feestracker import reports
+    _billed(conn, "1", "Rivas Tomas and Lucia", "2025-03-01", "Returns for Tomas, Lucia and Nico")
+    _billed(conn, "2", "Ferraz Holdings Inc", "2025-03-02")
+    _billed(conn, "3", "Vidal Ramon and Ines", "2025-03-03")
+    _billed(conn, "4", "Okafor, Ada", "2024-03-03")
+    db.save_client_list(conn, "2023", ["Bruno Ferraz", "Zed Nobody"])
+    db.save_client_list(conn, "2024", ["Nico Rivas", "Bruno Ferraz", "Ram Vidal", "Ada Okafor", "Zed Nobody"])
+    nb = reports.not_billed(conn, "2024")
+    found = reports.suggestions(conn, "2024", nb["rows"])
+    assert found["Nico Rivas"] == {"action": "with", "company": "Rivas Tomas and Lucia", "sure": True,
+                                   "why": "Nico is named on Rivas Tomas and Lucia’s invoice."}
+    assert found["Bruno Ferraz"]["company"] == "Ferraz Holdings Inc" and found["Bruno Ferraz"]["sure"]
+    assert found["Ram Vidal"]["action"] == "same" and found["Ram Vidal"]["client"] == "Vidal Ramon and Ines"
+    assert found["Ada Okafor"]["action"] == "bill"
+    assert found["Zed Nobody"]["action"] == "free" and "2023, 2024" in found["Zed Nobody"]["why"]
