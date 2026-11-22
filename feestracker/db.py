@@ -83,6 +83,14 @@ CREATE TABLE IF NOT EXISTS name_matches (
     confirmed_at TEXT NOT NULL
 );
 
+-- Guesses you said are wrong: this name on a client list is NOT this TaxDome client.
+CREATE TABLE IF NOT EXISTS not_matches (
+    list_name  TEXT NOT NULL,
+    client     TEXT NOT NULL,
+    marked_at  TEXT NOT NULL,
+    PRIMARY KEY (list_name, client)
+);
+
 -- Clients on a year's client list that you didn't file for that year, so the
 -- Not billed page leaves them out for that year only.
 CREATE TABLE IF NOT EXISTS not_filed (
@@ -332,6 +340,21 @@ def confirm_match(conn: sqlite3.Connection, list_name: str, client: str) -> None
 
 def name_matches(conn: sqlite3.Connection) -> dict[str, str]:
     return {r[0]: r[1] for r in conn.execute("SELECT list_name, client FROM name_matches")}
+
+
+def reject_match(conn: sqlite3.Connection, list_name: str, client: str) -> None:
+    """Remember that a name on a client list is not this TaxDome client, so it isn't guessed again."""
+    with conn:
+        conn.execute("INSERT OR IGNORE INTO not_matches (list_name, client, marked_at) VALUES (?, ?, ?)",
+                     (list_name, client, datetime.now().isoformat(timespec="seconds")))
+        conn.execute("DELETE FROM name_matches WHERE list_name = ? AND client = ?", (list_name, client))
+
+
+def not_matches(conn: sqlite3.Connection) -> dict[str, frozenset[str]]:
+    out: dict[str, set[str]] = {}
+    for name, client in conn.execute("SELECT list_name, client FROM not_matches"):
+        out.setdefault(name, set()).add(client)
+    return {k: frozenset(v) for k, v in out.items()}
 
 
 def mark_not_filed(conn: sqlite3.Connection, year: str, names: Iterable[str], filed: bool = False) -> None:

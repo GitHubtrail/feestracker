@@ -375,11 +375,12 @@ def not_billed(conn: sqlite3.Connection, year: str) -> dict:
     taxdome = Matcher(list(years))
     removed = set(db.removed_clients(conn))
     confirmed = db.name_matches(conn)
+    rejected = db.not_matches(conn)
     skipped = set(db.not_filed(conn, year))
     skipped |= {n for n, y in db.inactive_clients(conn).items() if y <= year}
     rows = []
     for name in names:
-        m = taxdome.best(name)
+        m = taxdome.best(name, rejected.get(name, frozenset()))
         client = m.found if m.same else None
         if confirmed.get(name) in years:
             client = confirmed[name]

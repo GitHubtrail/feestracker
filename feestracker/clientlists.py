@@ -30,6 +30,17 @@ IGNORED_WORDS = {
     "dds", "dmd", "md", "cpa", "dvm", "esq",
 }
 
+PROFESSIONAL = {"dds", "dmd", "md", "cpa", "dvm", "esq"}
+
+# Words many business names share, so matching on them alone means nothing
+# ("Shamsie Real Estate Group" is not "S & S Realty Group").
+GENERIC_WORDS = {
+    "group", "real", "realty", "estate", "properties", "property", "holdings", "investments",
+    "services", "service", "solutions", "consulting", "management", "enterprises", "associates",
+    "dental", "medical", "clinic", "health", "care", "family", "shop", "store", "international",
+    "global", "usa", "america", "american", "trading", "partners", "capital", "ventures",
+}
+
 # Name endings added to a first name, like "Rohanbhai" or "Hetalkumar".
 HONORIFIC = re.compile(r"(?<=[a-z]{3})(bhai|ben|kumar)$")
 
@@ -283,6 +294,11 @@ def is_company(name: str) -> bool:
     return any(f" {w} " in lowered for w in IGNORED_WORDS - {"and", "the", "of"})
 
 
+def is_professional(name: str) -> bool:
+    """A practice named after a person, like "Ali Khan DDS PC" or "Siddiq Hasan MD LLC"."""
+    return bool(PROFESSIONAL & set(re.findall(r"[a-z]+", name.lower().replace(".", ""))))
+
+
 def is_couple(name: str) -> bool:
     """A name listing two people, like "Rivera Maria and Jose" (not a company)."""
     lowered = " " + re.sub(r"[^a-z0-9&]+", " ", name.lower()) + " "
@@ -311,6 +327,8 @@ def score(a: tuple[str, ...], b: tuple[str, ...], spouse_added: bool = False) ->
         return 1.0
     short, long_ = (a, b) if len(a) <= len(b) else (b, a)
     best = [max(_word_score(w, x) for x in long_) for w in short]
+    if all(w in GENERIC_WORDS for w in short):
+        return 0.0  # only words like "Group" or "Realty" in common
     if min(best) < 0.8:
         whole = SequenceMatcher(None, " ".join(a), " ".join(b)).ratio()
         return whole * 0.85  # never "the same" on the spelling of the whole string alone
@@ -321,7 +339,11 @@ def score(a: tuple[str, ...], b: tuple[str, ...], spouse_added: bool = False) ->
             return s - 0.02  # only initials added, like "VS" in "S Sai Sandeep VS Ananthabhotla"
         if len(short) >= 2 and spouse_added and min(best) >= 0.95:
             return s - 0.03
-        return min(s, 0.85) if len(short) >= 2 else min(s, 0.78)
+        if len(short) >= 2:
+            return min(s, 0.85)
+        # One word against a longer name ("Sanjeet" for "Manjeet Singh") is only worth
+        # offering when that word is spelled exactly the same.
+        return 0.78 if s == 1.0 else 0.6
     return s
 
 
@@ -348,6 +370,7 @@ class Matcher:
         self.cleaned = [words(n) for n in self.names]
         self.couples = [is_couple(n) for n in self.names]
         self.companies = [is_company(n) for n in self.names]
+        self.professional = [is_professional(n) for n in self.names]
         self.exact: dict[tuple[str, ...], int] = {}
         self.by_word: dict[str, set[int]] = {}
         self.joined = {}
@@ -361,13 +384,26 @@ class Matcher:
         for i, n in enumerate(self.names):
             self.squashed.setdefault(squashed(n), i)
 
-    def best(self, name: str) -> Match:
+    def different_kind(self, name: str, i: int, exact: bool = False) -> bool:
+        """A person or couple against a company: "Ali Khan and Asma Numera" is not
+        "Ali Khan DDS PC", and "Pavan Lakkavajjula Corporation" is not the couple's return."""
+        company, couple, pro = is_company(name), is_couple(name), is_professional(name)
+        if company == self.companies[i]:
+            return False
+        if (couple or self.couples[i]) and not exact:  # same words, like "Chen and Sons" / "Chen & Sons Inc", is fine
+            return True
+        return pro or self.professional[i]  # "Siddiq Hasan" vs "Siddiq Hasan MD LLC"
+
+    def best(self, name: str, reject: frozenset = frozenset()) -> Match:
+        """The closest name, leaving out any in reject (names said not to be this one)."""
         w = words(name)
-        if w in self.exact:
-            return Match(name, self.names[self.exact[w]], 1.0)
+        i = self.exact.get(w)
+        if i is not None and self.names[i] not in reject and not self.different_kind(name, i, exact=True):
+            return Match(name, self.names[i], 1.0)
         sq = squashed(name)
-        if len(sq) >= 6 and sq in self.squashed:
-            return Match(name, self.names[self.squashed[sq]], 1.0)
+        i = self.squashed.get(sq)
+        if len(sq) >= 6 and i is not None and self.names[i] not in reject and not self.different_kind(name, i, exact=True):
+            return Match(name, self.names[i], 1.0)
         candidates: set[int] = set()
         for t in w:
             candidates |= self.by_word.get(t, set())
@@ -379,6 +415,8 @@ class Matcher:
         couple, company = is_couple(name), is_company(name)
         best_i, best_s = None, 0.0
         for i in candidates:
+            if self.names[i] in reject or self.different_kind(name, i):
+                continue
             c = self.cleaned[i]
             if len(w) > len(c):
                 spouse_added = couple and not self.companies[i]

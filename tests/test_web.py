@@ -375,7 +375,18 @@ def test_same_client_button_and_folded_never_list(server, tmp_path):
         ("match", "Acme Bakery Kitchen\tAcme Bakery, LLC"), ("back", "/not-billed?year=2024")])
     assert status == 303
     html = get(server + "/not-billed?year=2024")
-    assert "Same client" not in html and "On your list as Acme Bakery Kitchen" in html
+    assert "Same client" not in html and "Acme Bakery, LLC" in html and "On your list as" not in html
+
+
+def test_not_the_same_button_drops_the_guess(server, tmp_path):
+    upload(server, FIXTURE.read_bytes())
+    post_list(server, "2024", "c.csv", b"Name\nAcme Bakery Kitchen\n")
+    assert "Not the same" in get(server + "/not-billed?year=2024")
+    status = post_multi(server, "/not-billed/not-match", [
+        ("match", "Acme Bakery Kitchen\tAcme Bakery, LLC"), ("back", "/not-billed?year=2024")])
+    assert status == 303
+    html = get(server + "/not-billed?year=2024")
+    assert "Same client" not in html and "1 client with no invoices" in html
 
 
 def test_didnt_file_for_a_year(server, tmp_path):
@@ -405,9 +416,9 @@ def test_inactive_from_a_year(server, tmp_path):
     assert status == 303
     assert "No longer your client from tax year 2024" in get(server + back)
     assert "inactive from 2024" in get(server + "/clients")
-    assert "Maria Rivera" in get(server + "/not-billed?year=2023")
-    assert "On your list as Maria Rivera" not in get(server + "/not-billed?year=2024")
-    assert "On your list as Maria Rivera" not in get(server + "/not-billed?year=2025")
+    assert "alias>Maria Rivera<" in get(server + "/not-billed?year=2023")
+    assert "alias>Maria Rivera<" not in get(server + "/not-billed?year=2024")
+    assert "alias>Maria Rivera<" not in get(server + "/not-billed?year=2025")
     assert conn.execute("SELECT SUM(total_cents), SUM(written_off_cents) FROM invoice_view").fetchone()[:] == billed
     post_multi(server, "/clients/inactive", [("name", "Rivera Maria"), ("from_year", ""), ("back", back)])
     assert "Inactive from this tax year" in get(server + back)
@@ -418,7 +429,7 @@ def test_inactive_from_a_year(server, tmp_path):
 def test_inactive_from_all_clients(server):
     upload(server, FIXTURE.read_bytes())
     html = get(server + "/clients")
-    assert "No longer my client from" in html and "<option selected>2025</option>" in html
+    assert "Mark inactive from" in html and "<option selected>2025</option>" in html
     post_multi(server, "/clients/inactive", [("name", "Rivera Maria"), ("name", "Chen & Sons Inc"),
                                              ("from_year", "2025"), ("back", "/clients")])
     assert get(server + "/clients").count("inactive from 2025") == 2
