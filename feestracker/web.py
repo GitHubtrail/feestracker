@@ -802,7 +802,7 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
                         f"value=\"{pair}\">Not the same</button>")
             return (
                 f"<tr>{tick(r['client'] or r['name'])}<td>{client_link(r['client']) if r['client'] else escape(r['name'])}"
-                + (f"<div class='small muted'>On your list as {escape(r['name'])}</div>"
+                + (f"<span hidden class=alias>{escape(r['name'])}</span>"
                    if r["client"] and r["client"].lower() != r["name"].lower() else "")
                 + f"</td><td class=small>{KIND_NOTE[r['kind']]}"
                 + (f": maybe {client_link(r['maybe'])}{same}" if r["maybe"] else "")
