@@ -376,3 +376,40 @@ def test_same_client_button_and_folded_never_list(server, tmp_path):
     assert status == 303
     html = get(server + "/not-billed?year=2024")
     assert "Same client" not in html and "On your list as Acme Bakery Kitchen" in html
+
+
+def test_didnt_file_for_a_year(server, tmp_path):
+    upload(server, FIXTURE.read_bytes())
+    post_list(server, "2024", "c.csv", b"Name\nNobody Here\nSam Other\n")
+    post_list(server, "2023", "c.csv", b"Name\nNobody Here\n")
+    status = post_multi(server, "/not-billed/not-filed", [("year", "2024"), ("name", "Nobody Here")])
+    assert status == 303
+    html = get(server + "/not-billed?year=2024")
+    assert "Didn't file for 2024 (1)" in html
+    assert html.split("Didn't file for 2024 (1)")[0].count("Nobody Here") == 0
+    assert "Nobody Here" in get(server + "/not-billed?year=2023")  # other years unchanged
+    post_multi(server, "/not-billed/not-filed", [("year", "2024"), ("filed", "1"), ("name", "Nobody Here")])
+    assert "Didn't file for 2024 (" not in get(server + "/not-billed?year=2024")
+
+
+def test_inactive_from_a_year(server, tmp_path):
+    from urllib.parse import quote
+    upload(server, FIXTURE.read_bytes())
+    for y in ("2023", "2024", "2025"):
+        post_list(server, y, "c.csv", b"Name\nMaria Rivera\n")
+    conn = db.connect(tmp_path / "web.db")
+    billed = conn.execute("SELECT SUM(total_cents), SUM(written_off_cents) FROM invoice_view").fetchone()[:]
+    back = "/client?name=" + quote("Rivera Maria")
+    assert "Inactive from this tax year" in get(server + back)
+    status = post_multi(server, "/clients/inactive", [("name", "Rivera Maria"), ("from_year", "2024"), ("back", back)])
+    assert status == 303
+    assert "No longer your client from tax year 2024" in get(server + back)
+    assert "inactive from 2024" in get(server + "/clients")
+    assert "Maria Rivera" in get(server + "/not-billed?year=2023")
+    assert "On your list as Maria Rivera" not in get(server + "/not-billed?year=2024")
+    assert "On your list as Maria Rivera" not in get(server + "/not-billed?year=2025")
+    assert conn.execute("SELECT SUM(total_cents), SUM(written_off_cents) FROM invoice_view").fetchone()[:] == billed
+    post_multi(server, "/clients/inactive", [("name", "Rivera Maria"), ("from_year", ""), ("back", back)])
+    assert "Inactive from this tax year" in get(server + back)
+    assert post_multi(server, "/clients/inactive", [("name", "Rivera Maria"), ("from_year", "1999")]) == 400
+    conn.close()

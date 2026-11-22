@@ -83,6 +83,23 @@ CREATE TABLE IF NOT EXISTS name_matches (
     confirmed_at TEXT NOT NULL
 );
 
+-- Clients on a year's client list that you didn't file for that year, so the
+-- Not billed page leaves them out for that year only.
+CREATE TABLE IF NOT EXISTS not_filed (
+    year      TEXT NOT NULL,
+    name      TEXT NOT NULL,
+    marked_at TEXT NOT NULL,
+    PRIMARY KEY (year, name)
+);
+
+-- Clients who are no longer yours from a tax year on, so you know not to bill
+-- them. Their invoices, payments and bad debts stay as they are.
+CREATE TABLE IF NOT EXISTS inactive_clients (
+    name      TEXT PRIMARY KEY,
+    from_year TEXT NOT NULL,
+    marked_at TEXT NOT NULL
+);
+
 -- Clients you removed. Their invoices are left out of every page and total, and
 -- stay left out after a new TaxDome import, until you put them back.
 CREATE TABLE IF NOT EXISTS removed_clients (
@@ -315,3 +332,35 @@ def confirm_match(conn: sqlite3.Connection, list_name: str, client: str) -> None
 
 def name_matches(conn: sqlite3.Connection) -> dict[str, str]:
     return {r[0]: r[1] for r in conn.execute("SELECT list_name, client FROM name_matches")}
+
+
+def mark_not_filed(conn: sqlite3.Connection, year: str, names: Iterable[str], filed: bool = False) -> None:
+    """Note that you didn't file these clients for a tax year (or, with filed=True, undo it)."""
+    now = datetime.now().isoformat(timespec="seconds")
+    with conn:
+        if filed:
+            conn.executemany("DELETE FROM not_filed WHERE year = ? AND name = ?", [(year, n) for n in set(names)])
+        else:
+            conn.executemany("INSERT OR IGNORE INTO not_filed (year, name, marked_at) VALUES (?, ?, ?)",
+                             [(year, n, now) for n in set(names) if n.strip()])
+
+
+def not_filed(conn: sqlite3.Connection, year: str) -> list[str]:
+    return [r[0] for r in conn.execute(
+        "SELECT name FROM not_filed WHERE year = ? ORDER BY name COLLATE NOCASE", (year,))]
+
+
+def set_inactive(conn: sqlite3.Connection, names: Iterable[str], from_year: str | None) -> None:
+    """Mark clients inactive from a tax year on, or active again with from_year=None."""
+    now = datetime.now().isoformat(timespec="seconds")
+    with conn:
+        if from_year is None:
+            conn.executemany("DELETE FROM inactive_clients WHERE name = ?", [(n,) for n in set(names)])
+        else:
+            conn.executemany(
+                "INSERT OR REPLACE INTO inactive_clients (name, from_year, marked_at) VALUES (?, ?, ?)",
+                [(n, from_year, now) for n in set(names) if n.strip()])
+
+
+def inactive_clients(conn: sqlite3.Connection) -> dict[str, str]:
+    return {r[0]: r[1] for r in conn.execute("SELECT name, from_year FROM inactive_clients")}

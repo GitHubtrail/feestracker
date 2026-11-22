@@ -198,3 +198,11 @@ def test_confirmed_name_counts_as_that_client(conn):
     db.confirm_match(conn, "Acme Bakery Kitchen", "Acme Bakery, LLC")
     row = reports.not_billed(conn, "2024")["rows"][0]
     assert row["kind"] == "in_taxdome" and row["client"] == "Acme Bakery, LLC"
+
+
+def test_year_written_alone_in_a_service_line():
+    from feestracker.reports import tax_years_of
+    assert tax_years_of("", "2026-11-12", ["FBAR - Ashish - 2025", "Forms - ty 2024"]) == {"2024", "2025"}
+    assert tax_years_of("", "2026-01-26", ["Tax Return Preparation -2024"]) == {"2024"}
+    assert tax_years_of("", "2024-01-15", ["Due January 16 2024"]) == {"2023"}  # a date, not a tax year
+    assert tax_years_of("", "2025-05-01", ["Paid 4/15/2025"]) == {"2024"}
