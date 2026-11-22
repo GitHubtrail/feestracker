@@ -21,7 +21,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__, db, reports, storage
-from .clientlists import ListError, looks_like_client_list, names_from_text, read_names
+from .clientlists import ListError, looks_like_client_list, names_from_text, read_aliases, read_names
 from .taxdome import ImportError_, format_cents, read_invoices
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -377,6 +377,10 @@ def entered_page(conn: sqlite3.Connection) -> bytes:
     return page("Payments you entered", body, "/paid")
 
 
+def tick_number(number: str) -> str:
+    return f"<td class=tick><input type=checkbox name=number value=\"{escape(number)}\" checked></td>"
+
+
 def tick(name: str) -> str:
     return f"<td class=tick><input type=checkbox name=name value=\"{escape(name)}\"></td>"
 
@@ -530,6 +534,7 @@ def client_page(conn: sqlite3.Connection, today: date, name: str) -> bytes:
             f"<tr><td>{escape(i['number'])}"
             + (f"<div class=small><a href='/outside?edit={quote(i['number'])}'>Edit</a></div>"
                if db.is_outside(i["number"]) else "")
+            + remove_invoice_button(i["number"], name)
             + f"</td><td>{escape(i['invoice_date'][:10])}</td>"
             f"<td><span class='pill {STATUS_CLASS.get(i['status'], '')}'>{escape(i['status'])}</span>{age}</td>"
             f"<td class=small>{services}</td><td class=n>{money(i['total_cents'])}</td>"
@@ -560,9 +565,36 @@ def client_page(conn: sqlite3.Connection, today: date, name: str) -> bytes:
     <div class=wrap><table><thead><tr><th>Invoice</th><th>Date</th><th>Status</th><th>Services</th>
       <th class=n>Total</th><th class=n>Paid</th><th class=n>Owes</th></tr></thead>
       <tbody>{''.join(rows)}</tbody></table></div>
+    {removed_invoices_html(conn, name)}
     <h2>More</h2>
     {inactive_box(conn, name, today)}"""
     return page(name, body)
+
+
+def remove_invoice_button(number: str, client: str) -> str:
+    """Removes one invoice, for example a duplicate you deleted in TaxDome. Undoable."""
+    title = ("Deletes this bill and its payments" if db.is_outside(number)
+             else "Leaves it out of every page and total, even after a new import. You can put it back.")
+    return (f"<form class=act method=post action='/invoices/remove'>"
+            f"<input type=hidden name=number value=\"{escape(number)}\">"
+            f"<input type=hidden name=back value=\"/client?name={escape(quote(client))}\">"
+            f"<button title='{title}'>Remove</button></form>")
+
+
+def removed_invoices_html(conn: sqlite3.Connection, client: str) -> str:
+    gone = db.removed_invoices(conn, client)
+    if not gone:
+        return ""
+    items = "".join(
+        f"<tr><td>{escape(r['number'])}</td><td>{escape(r['invoice_date'][:10])}</td>"
+        f"<td class=n>{money(r['total_cents'])}</td><td><form class=act method=post action='/invoices/restore'>"
+        f"<input type=hidden name=number value=\"{escape(r['number'])}\">"
+        f"<input type=hidden name=back value=\"/client?name={escape(quote(client))}\">"
+        f"<button>Put back</button></form></td></tr>" for r in gone)
+    return f"""<h2>Removed invoices ({len(gone)})</h2>
+    <p class="small muted">Left out of every page and total, even after a new TaxDome import.</p>
+    <div class=wrap><table><thead><tr><th>Invoice</th><th>Date</th><th class=n>Total</th><th></th></tr></thead>
+    <tbody>{items}</tbody></table></div>"""
 
 
 def inactive_badge(conn: sqlite3.Connection, name: str) -> str:
@@ -1242,6 +1274,18 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
             if path in ("/clients/free", "/clients/billed-with", "/not-billed/put-back"):
                 self._list_marks(path)
                 return
+            if path in ("/invoices/remove", "/invoices/restore"):
+                fields = self._fields()
+                conn = db.connect(db_path)
+                try:
+                    numbers = [n for n in fields.get("number", []) if n]
+                    if path == "/invoices/remove":
+                        db.remove_invoices(conn, numbers)
+                    else:
+                        db.restore_invoices(conn, numbers)
+                finally:
+                    conn.close()
+                return self._go((fields.get("back") or ["/"])[0])
             if path in ("/outside", "/outside/edit", "/outside/delete"):
                 self._outside(path)
                 return
@@ -1263,14 +1307,25 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                 # A client list sent to Import by mistake: offer to save it as one instead.
                 # Nothing is saved until the tax year is chosen, and bills are never touched.
                 try:
-                    self._send(client_list_found(filename, read_names(data, filename), today_fn()))
+                    names = read_names(data, filename)
+                    conn = db.connect(db_path)
+                    try:
+                        db.save_aliases(conn, read_aliases(data, filename))  # names only, harmless
+                    finally:
+                        conn.close()
+                    self._send(client_list_found(filename, names, today_fn()))
                     return
                 except ListError:
                     pass
             conn = db.connect(db_path)
             try:
                 text = data.decode("utf-8-sig", errors="replace")
-                counts = db.save_invoices(conn, read_invoices(io.StringIO(text, newline="")), "upload")
+                invoices = list(read_invoices(io.StringIO(text, newline="")))
+                counts = db.save_invoices(conn, invoices, "upload")
+                missing = db.missing_from_import(conn, {i.number for i in invoices})
+                # Only a full export says what was deleted; a small or filtered one says nothing.
+                if len(missing) > max(5, len(invoices) // 10):
+                    missing = []
             except ImportError_ as exc:
                 self._send(import_page(f"<div class='note owe'>{escape(str(exc))}</div>"),
                            status=HTTPStatus.BAD_REQUEST)
@@ -1280,6 +1335,18 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
             msg = (f"<div class='note ok'>Imported {counts['invoices']} invoices: "
                    f"{counts['added']} new, {counts['updated']} updated. "
                    "<a href='/'>See the summary →</a></div>")
+            if missing:
+                items = "".join(
+                    f"<tr>{tick_number(r['number'])}<td>{escape(r['number'])}</td><td>{client_link(r['client'])}</td>"
+                    f"<td>{escape(r['invoice_date'][:10])}</td><td class=n>{money(r['total_cents'])}</td></tr>"
+                    for r in missing)
+                msg += f"""<h2>Not in this export ({len(missing)})</h2>
+                <p>These invoices are in Fees Tracker but not in the file you imported, so they were most
+                  likely deleted in TaxDome. Remove them here too so they stop counting.</p>
+                <form method=post action="/invoices/remove"><input type=hidden name=back value="/">
+                <div class=wrap><table><thead><tr><th></th><th>Invoice</th><th>Client</th><th>Date</th>
+                  <th class=n>Total</th></tr></thead><tbody>{items}</tbody></table></div>
+                <p><button>Remove ticked invoices</button></p></form>"""
             self._send(import_page(msg))
 
         def _bad_debt(self):
@@ -1408,6 +1475,7 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                 try:
                     if data:
                         names, source = read_names(data, filename), filename
+                        db.save_aliases(conn, read_aliases(data, filename))
                     elif pasted.strip():
                         source = form.get("source", ("", b""))[1].decode("utf-8", "replace").strip()
                         names, source = names_from_text(pasted), source or "pasted names"
@@ -1417,7 +1485,7 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                 except ListError as exc:
                     return reply(escape(str(exc)), False, status=HTTPStatus.BAD_REQUEST)
                 db.save_client_list(conn, year, names, source)
-                reply(f"Saved your {escape(year)} list with {count(len(names), 'client')}.", True, year)
+                reply(f"Saved your ATX {escape(year)} list with {count(len(names), 'client')}.", True, year)
             finally:
                 conn.close()
 

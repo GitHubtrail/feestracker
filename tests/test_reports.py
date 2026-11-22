@@ -182,15 +182,15 @@ def test_not_billed_for_a_tax_year(conn):
 
 def test_obvious_name_variants_match():
     from feestracker.clientlists import Matcher
-    m = Matcher(["FareFund LLC", "HyLine Dental Associates, PC", "Chauhan Rohanbhai", "Ali Khan DDS PC",
-                 "Patel, Hetal and Bhavini"])
-    assert m.best("Fare Fund Llc").found == "FareFund LLC" and m.best("Fare Fund Llc").same
-    assert m.best("Hy Line Dental Associates Pc").same
-    assert m.best("Rohan Chauhan").found == "Chauhan Rohanbhai" and m.best("Rohan Chauhan").same
-    assert m.best("Ali Khan Dds Pc").same
+    m = Matcher(["SunRise LLC", "BayView Dental Associates, PC", "Mehta Rajbhai", "Sam Lee DDS PC",
+                 "Desai, Nilesh and Kavita"])
+    assert m.best("Sun Rise Llc").found == "SunRise LLC" and m.best("Sun Rise Llc").same
+    assert m.best("Bay View Dental Associates Pc").same
+    assert m.best("Raj Mehta").found == "Mehta Rajbhai" and m.best("Raj Mehta").same
+    assert m.best("Sam Lee Dds Pc").same
     # A person is not their practice, and a couple is not a company.
-    assert m.best("Ali Khan").found != "Ali Khan DDS PC"
-    assert m.best("Hetalkumar Patel and Bhavini Patel").same
+    assert m.best("Sam Lee").found != "Sam Lee DDS PC"
+    assert m.best("Nileshkumar Desai and Kavita Desai").same
     assert not m.best("Kumar Patel").same
 
 
@@ -204,7 +204,7 @@ def test_confirmed_name_counts_as_that_client(conn):
 
 def test_year_written_alone_in_a_service_line():
     from feestracker.reports import tax_years_of
-    assert tax_years_of("", "2026-11-12", ["FBAR - Ashish - 2025", "Forms - ty 2024"]) == {"2024", "2025"}
+    assert tax_years_of("", "2026-11-12", ["FBAR - Dana - 2025", "Forms - ty 2024"]) == {"2024", "2025"}
     assert tax_years_of("", "2026-01-26", ["Tax Return Preparation -2024"]) == {"2024"}
     assert tax_years_of("", "2024-01-15", ["Due January 16 2024"]) == {"2023"}  # a date, not a tax year
     assert tax_years_of("", "2025-05-01", ["Paid 4/15/2025"]) == {"2024"}
@@ -221,3 +221,18 @@ def test_copied_invoice_with_old_tax_year(conn):
                      (number, text, when))
     # Invoice 4 is the first to name 2022, so a late return billed in 2026 still counts for 2022.
     assert reports.client_tax_years(conn)["Copy Client"] == {"2022", "2023", "2024", "2025"}
+
+
+def test_return_name_used_when_names_differ(conn):
+    """ATX keeps "Raul Castillo" as the filer, but the return (and TaxDome) says Moreno."""
+    from feestracker import clientlists, reports
+    data = (b'"Return Name","First Name","Last Name","Spouse First Name","Spouse Last Name","Company Name"\n'
+            b'"Moreno Raul & Diaz Elena","RAUL","CASTILLO","ELENA","DIAZ",""\n')
+    names = clientlists.read_names(data, "atx.csv")
+    assert names == ["Raul Castillo and Elena Diaz"]
+    conn.execute("INSERT INTO invoices (number, status, client, invoice_date, total_cents, paid_cents, balance_cents)"
+                 " VALUES ('77', 'paid', 'Moreno, Raul', '2026-04-10', 84500, 84500, 0)")
+    db.save_client_list(conn, "2025", names)
+    assert [r["name"] for r in reports.not_billed(conn, "2025")["rows"]] == names
+    db.save_aliases(conn, clientlists.read_aliases(data, "atx.csv"))
+    assert reports.not_billed(conn, "2025")["rows"] == []

@@ -1,6 +1,6 @@
 """Client lists for a year (CSV, Excel or pasted names) and matching names across them.
 
-Names are written many ways ("Shah, Pinky", "Pinky Shah", "Acme Bakery LLC",
+Names are written many ways ("Lee, Dana", "Dana Lee", "Acme Bakery LLC",
 "Acme Bakery, L.L.C."), so names are compared word by word after cleaning,
 ignoring word order, punctuation, "and"/"&" and company endings like LLC or Inc.
 Small spelling differences between words still count as the same word.
@@ -26,14 +26,14 @@ MAYBE = 0.72
 IGNORED_WORDS = {
     "and", "the", "of", "llc", "inc", "incorporated", "corp", "corporation", "co",
     "company", "ltd", "limited", "pllc", "pc", "pa", "lp", "llp", "plc", "dba",
-    # Professional titles after a name, like "Ali Khan DDS PC".
+    # Professional titles after a name, like "Sam Lee DDS PC".
     "dds", "dmd", "md", "cpa", "dvm", "esq",
 }
 
 PROFESSIONAL = {"dds", "dmd", "md", "cpa", "dvm", "esq"}
 
 # Words many business names share, so matching on them alone means nothing
-# ("Shamsie Real Estate Group" is not "S & S Realty Group").
+# ("Oakfield Real Estate Group" is not "R & R Realty Group").
 GENERIC_WORDS = {
     "group", "real", "realty", "estate", "properties", "property", "holdings", "investments",
     "services", "service", "solutions", "consulting", "management", "enterprises", "associates",
@@ -41,7 +41,7 @@ GENERIC_WORDS = {
     "global", "usa", "america", "american", "trading", "partners", "capital", "ventures",
 }
 
-# Name endings added to a first name, like "Rohanbhai" or "Hetalkumar".
+# Name endings added to a first name, like "Rajbhai" or "Nileshkumar".
 HONORIFIC = re.compile(r"(?<=[a-z]{3})(bhai|ben|kumar)$")
 
 NAME_HEADERS = (
@@ -59,6 +59,26 @@ class ListError(ValueError):
 
 def read_names(data: bytes, filename: str = "") -> list[str]:
     """Client names from an uploaded CSV, Excel (.xlsx) or plain text file."""
+    return names_from_rows(_file_rows(data, filename))
+
+
+def read_aliases(data: bytes, filename: str = "") -> dict[str, str]:
+    """For a tax software return list, each client's return name when it differs from
+    the name kept ("Moreno Raul & Diaz Elena" for "Raul Castillo
+    and Elena Diaz"), since TaxDome is often spelled like the return name."""
+    try:
+        rows = [[(c or "").strip() for c in r] for r in _file_rows(data, filename) if any((c or "").strip() for c in r)]
+    except ListError:
+        return {}
+    if not rows:
+        return {}
+    header = [c.lower() for c in rows[0]]
+    if "return name" not in header or not ("first name" in header or "company name" in header):
+        return {}
+    return {name: alias for name, alias in _returns(header, rows[1:]) if alias and alias != name}
+
+
+def _file_rows(data: bytes, filename: str) -> list[list[str]]:
     if data[:2] == b"PK" or filename.lower().endswith((".xlsx", ".xlsm")):
         rows = _xlsx_rows(data)
     elif filename.lower().endswith(".xls") or data[:4] == b"\xd0\xcf\x11\xe0":
@@ -68,7 +88,7 @@ def read_names(data: bytes, filename: str = "") -> list[str]:
         )
     else:
         rows = _text_rows(data.decode("utf-8-sig", errors="replace"))
-    return names_from_rows(rows)
+    return rows
 
 
 def looks_like_client_list(data: bytes, filename: str = "") -> bool:
@@ -105,7 +125,7 @@ def _text_rows(text: str) -> list[list[str]]:
     elif all(ln.count(",") == lines[0].count(",") for ln in lines[:20]) and lines[0].count(",") > 1:
         delim = ","  # a real CSV with several columns
     else:
-        # One name per line. "Shah, Pinky" is a single name, so don't split on commas.
+        # One name per line. "Lee, Dana" is a single name, so don't split on commas.
         return [[ln.strip().strip('"')] for ln in lines]
     return [row for row in csv.reader(io.StringIO("\n".join(lines)), delimiter=delim)]
 
@@ -158,28 +178,34 @@ def _names_from_returns(header: list[str], rows: list[list[str]]) -> list[str]:
     """A tax software return list: one row per return, so a client can appear several
     times (estimates, extensions, amended returns). The client is the company name for
     business returns, or the filer and spouse for personal returns."""
+    return _unique(name for name, _ in _returns(header, rows))
+
+
+def _returns(header: list[str], rows: list[list[str]]) -> list[tuple[str, str]]:
+    """(client name, return name) for each return that is a client's."""
     col = {h: i for i, h in reversed(list(enumerate(header)))}
 
     def get(r: list[str], h: str) -> str:
         i = col.get(h)
         return r[i].strip() if i is not None and i < len(r) else ""
 
-    names = []
+    out = []
     for r in rows:
         if NOT_A_CLIENT.search(get(r, "return name")):
             continue
         company = _tidy(get(r, "company name"))
         filer = _tidy(" ".join(x for x in (get(r, "first name"), get(r, "last name")) if x))
         spouse = _tidy(" ".join(x for x in (get(r, "spouse first name"), get(r, "spouse last name")) if x))
+        return_name = _tidy(RETURN_SUFFIX.split(get(r, "return name"))[0])
         if company:
             name = company
         elif filer:
             name = f"{filer} and {spouse}" if spouse else filer
         else:
-            name = _tidy(RETURN_SUFFIX.split(get(r, "return name"))[0])
+            name = return_name
         if len(re.findall(r"[A-Za-z]", name)) >= 2:
-            names.append(name)
-    return _unique(names)
+            out.append((name, return_name))
+    return out
 
 
 # The end of a return name that describes the return, not the client: "-ext", "-ES q2",
@@ -275,14 +301,14 @@ def words(name: str) -> tuple[str, ...]:
     text = text.replace("&", " and ").replace("l.l.c", "llc")
     text = re.sub(r"\(.*?\)", " ", text)  # nicknames like "(Siva)"
     tokens = re.findall(r"[a-z0-9]+", text.replace(".", ""))
-    # Drop company endings, "and", and initials such as the "K" in "Konduru, Sasi K."
+    # Drop company endings, "and", and initials such as the "K" in "Lopez, Ana K."
     kept = [HONORIFIC.sub("", t) for t in tokens if t not in IGNORED_WORDS and (len(t) > 1 or t.isdigit())]
     return tuple(sorted(set(kept or tokens)))
 
 
 def squashed(name: str) -> str:
-    """A name's letters with spaces and endings removed, so "Fare Fund Llc" and
-    "FareFund LLC", or "Hy Line Dental Associates Pc" and "HyLine Dental Associates, PC",
+    """A name's letters with spaces and endings removed, so "Sun Rise Llc" and
+    "SunRise LLC", or "Bay View Dental Associates Pc" and "BayView Dental Associates, PC",
     come out the same."""
     text = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
     text = re.sub(r"\(.*?\)", " ", text.replace("&", " and ").replace("l.l.c", "llc").replace(".", ""))
@@ -295,7 +321,7 @@ def is_company(name: str) -> bool:
 
 
 def is_professional(name: str) -> bool:
-    """A practice named after a person, like "Ali Khan DDS PC" or "Siddiq Hasan MD LLC"."""
+    """A practice named after a person, like "Sam Lee DDS PC" or "Ana Ruiz MD LLC"."""
     return bool(PROFESSIONAL & set(re.findall(r"[a-z]+", name.lower().replace(".", ""))))
 
 
@@ -317,8 +343,8 @@ def score(a: tuple[str, ...], b: tuple[str, ...], spouse_added: bool = False) ->
 
     Words may be in any order and spelled slightly differently. When one name
     has extra words, it is only the same client if those extra words are a
-    spouse ("Vangoor Janakiramreddy" and "Vangoor Janakiramreddy and Swapna");
-    otherwise ("DD Housing LLC" and "DD Housing Northwest LLC") it is only a
+    spouse ("Ortiz Carlos" and "Ortiz Carlos and Elena");
+    otherwise ("AB Housing LLC" and "AB Housing Northwest LLC") it is only a
     possible match for a person to check.
     """
     if not a or not b:
@@ -336,12 +362,12 @@ def score(a: tuple[str, ...], b: tuple[str, ...], spouse_added: bool = False) ->
     if len(short) < len(long_):
         extra = [x for x in long_ if max(_word_score(x, w) for w in short) < 0.8]
         if len(short) >= 2 and min(best) >= 0.95 and all(len(x) <= 2 for x in extra):
-            return s - 0.02  # only initials added, like "VS" in "S Sai Sandeep VS Ananthabhotla"
+            return s - 0.02  # only initials added, like "KS" in "J Paul KS Moreno"
         if len(short) >= 2 and spouse_added and min(best) >= 0.95:
             return s - 0.03
         if len(short) >= 2:
             return min(s, 0.85)
-        # One word against a longer name ("Sanjeet" for "Manjeet Singh") is only worth
+        # One word against a longer name ("Dario" for "Mario Rossi") is only worth
         # offering when that word is spelled exactly the same.
         return 0.78 if s == 1.0 else 0.6
     return s
@@ -385,14 +411,14 @@ class Matcher:
             self.squashed.setdefault(squashed(n), i)
 
     def different_kind(self, name: str, i: int, exact: bool = False) -> bool:
-        """A person or couple against a company: "Ali Khan and Asma Numera" is not
-        "Ali Khan DDS PC", and "Pavan Lakkavajjula Corporation" is not the couple's return."""
+        """A person or couple against a company: "Sam Lee and Ana Lee" is not
+        "Sam Lee DDS PC", and "Raul Moreno Corporation" is not the couple's return."""
         company, couple, pro = is_company(name), is_couple(name), is_professional(name)
         if company == self.companies[i]:
             return False
         if (couple or self.couples[i]) and not exact:  # same words, like "Chen and Sons" / "Chen & Sons Inc", is fine
             return True
-        return pro or self.professional[i]  # "Siddiq Hasan" vs "Siddiq Hasan MD LLC"
+        return pro or self.professional[i]  # "Ana Ruiz" vs "Ana Ruiz MD LLC"
 
     def best(self, name: str, reject: frozenset = frozenset()) -> Match:
         """The closest name, leaving out any in reject (names said not to be this one)."""

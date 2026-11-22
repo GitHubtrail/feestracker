@@ -527,3 +527,25 @@ def test_entered_payment_also_in_taxdome_is_flagged(server, tmp_path):
     pid = conn.execute("SELECT id FROM manual_payments").fetchone()[0]
     assert post_multi(server, "/payment", [("action", "delete"), ("id", str(pid)), ("back", "/entered")]) == 303
     assert "may now be in TaxDome too" not in get(server + "/")
+
+
+def test_remove_a_duplicate_invoice_and_spot_deleted_ones(server, tmp_path):
+    from feestracker import db
+    upload(server, FIXTURE.read_bytes())
+    conn = db.connect(tmp_path / "web.db")
+    inv = conn.execute("SELECT number, client, total_cents FROM invoice_view LIMIT 1").fetchone()
+    billed = conn.execute("SELECT SUM(total_cents) FROM invoice_view").fetchone()[0]
+    back = "/client?name=" + urllib.parse.quote(inv["client"])
+    assert post_multi(server, "/invoices/remove", [("number", inv["number"]), ("back", back)]) == 303
+    assert conn.execute("SELECT SUM(total_cents) FROM invoice_view").fetchone()[0] == billed - inv["total_cents"]
+    upload(server, FIXTURE.read_bytes())  # a new import doesn't bring it back
+    assert conn.execute("SELECT SUM(total_cents) FROM invoice_view").fetchone()[0] == billed - inv["total_cents"]
+    assert "Removed invoices (1)" in get(server + back)
+    post_multi(server, "/invoices/restore", [("number", inv["number"]), ("back", back)])
+    assert conn.execute("SELECT SUM(total_cents) FROM invoice_view").fetchone()[0] == billed
+    # An invoice the new export doesn't have is offered for removal.
+    conn.execute("INSERT INTO invoices (number, status, client, total_cents, paid_cents, balance_cents)"
+                 " VALUES ('999', 'unpaid', 'Gone Client', 500, 0, 500)")
+    conn.commit()
+    status, html = upload(server, FIXTURE.read_bytes())
+    assert "Not in this export (1)" in html and "Gone Client" in html
