@@ -65,6 +65,24 @@ def test_bring_back_adjustments(home):
     conn.close()
 
 
+def test_bring_back_keeps_outside_bills_and_marks(home):
+    old = home / "Desktop" / "feestracker-main" / "data" / "feestracker.db"
+    make_db(old)
+    c = db.connect(old)
+    db.add_outside_bill(c, "Sam Other", "2024", 50000, "2025-03-01", "Cash", 20000, "2025-03-05")
+    db.set_free(c, ["Free Person"])
+    db.link_billed_with(c, ["Owner Person"], "Some Co")
+    c.close()
+    target = storage.default_db()
+    make_db(target)
+    conn = db.connect(target)
+    storage.bring_back_adjustments(conn, old)
+    bills = db.outside_bills(conn)
+    assert [(b["client"], b["total_cents"], b["paid_cents"]) for b in bills] == [("Sam Other", 50000, 20000)]
+    assert db.free_clients(conn) == ["Free Person"] and db.billed_with(conn) == {"Owner Person": "Some Co"}
+    conn.close()
+
+
 def zip_of(files: dict[str, str]) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:

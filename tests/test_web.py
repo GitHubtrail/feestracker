@@ -332,7 +332,7 @@ def test_client_list_sent_to_import_is_offered_as_a_client_list(server, tmp_path
     conn = db.connect(tmp_path / "web.db")
     before = conn.execute("SELECT COUNT(*), SUM(total_cents) FROM invoices").fetchone()[:]
     status, html = upload(server, RETURN_LIST, "Clients 2024.csv")
-    assert status == 200 and "This is a client list" in html and "3 clients" in html
+    assert status == 200 and "This is an ATX list" in html and "3 clients" in html
     assert "<option selected>2024</option>" in html
     assert "123-45-6789" not in html and "98-7654321" not in html
     assert conn.execute("SELECT COUNT(*), SUM(total_cents) FROM invoices").fetchone()[:] == before
@@ -370,7 +370,7 @@ def test_same_client_button_and_folded_never_list(server, tmp_path):
     upload(server, FIXTURE.read_bytes())
     post_list(server, "2024", "c.csv", b"Name\nAcme Bakery Kitchen\nNobody Here\n")
     html = get(server + "/not-billed?year=2024")
-    assert "Same client" in html and "<details>" in html and "1 client with no invoices" in html
+    assert "Same client" in html and "<details>" in html and "1 return in ATX, never invoiced" in html
     status = post_multi(server, "/not-billed/match", [
         ("match", "Acme Bakery Kitchen\tAcme Bakery, LLC"), ("back", "/not-billed?year=2024")])
     assert status == 303
@@ -386,7 +386,7 @@ def test_not_the_same_button_drops_the_guess(server, tmp_path):
         ("match", "Acme Bakery Kitchen\tAcme Bakery, LLC"), ("back", "/not-billed?year=2024")])
     assert status == 303
     html = get(server + "/not-billed?year=2024")
-    assert "Same client" not in html and "1 client with no invoices" in html
+    assert "Same client" not in html and "1 return in ATX, never invoiced" in html
 
 
 def test_didnt_file_for_a_year(server, tmp_path):
@@ -396,11 +396,11 @@ def test_didnt_file_for_a_year(server, tmp_path):
     status = post_multi(server, "/not-billed/not-filed", [("year", "2024"), ("name", "Nobody Here")])
     assert status == 303
     html = get(server + "/not-billed?year=2024")
-    assert "Didn't file for 2024 (1)" in html
-    assert html.split("Didn't file for 2024 (1)")[0].count("Nobody Here") == 0
+    assert "Taken off the 2024 list (1)" in html
+    assert html.split("Taken off the 2024 list (1)")[0].count("Nobody Here") == 0
     assert "Nobody Here" in get(server + "/not-billed?year=2023")  # other years unchanged
     post_multi(server, "/not-billed/not-filed", [("year", "2024"), ("filed", "1"), ("name", "Nobody Here")])
-    assert "Didn't file for 2024 (" not in get(server + "/not-billed?year=2024")
+    assert "Taken off the 2024 list" not in get(server + "/not-billed?year=2024")
 
 
 def test_inactive_from_a_year(server, tmp_path):
@@ -452,3 +452,63 @@ def test_paid_in_full_and_bad_debt_for_ticked_clients(server, tmp_path):
                         ).fetchone()[0] > 0
     assert "Nobody owes anything here" in get(server + "/owes")
     conn.close()
+
+
+def test_free_return_and_put_back(server, tmp_path):
+    upload(server, FIXTURE.read_bytes())
+    post_list(server, "2024", "c.csv", b"Name\nNobody Here\n")
+    post_list(server, "2023", "c.csv", b"Name\nNobody Here\n")
+    assert post_multi(server, "/clients/free", [("name", "Nobody Here"), ("back", "/not-billed?year=2024")]) == 303
+    for year in ("2023", "2024"):  # every year
+        html = get(server + f"/not-billed?year={year}")
+        assert f"Taken off the {year} list (1)" in html and "Free return" in html
+    post_multi(server, "/not-billed/put-back", [("year", "2024"), ("name", "Nobody Here")])
+    assert "Taken off the 2023 list" not in get(server + "/not-billed?year=2023")
+
+
+def test_billed_with_company(server, tmp_path):
+    from feestracker import db, reports
+    upload(server, FIXTURE.read_bytes())
+    conn = db.connect(tmp_path / "web.db")
+    company = next(c for c, ys in reports.client_tax_years(conn).items() if "2024" in ys)
+    post_list(server, "2024", "c.csv", b"Name\nNobody Here\n")
+    assert "Billed with company" in get(server + "/not-billed?year=2024")
+    # A company that isn't a client is refused, with nothing changed.
+    assert post_multi(server, "/clients/billed-with", [("name", "Nobody Here"), ("company", "No Such Co")]) == 400
+    status = post_multi(server, "/clients/billed-with", [("name", "Nobody Here"), ("company", company.upper()),
+                                                         ("back", "/not-billed?year=2024")])
+    assert status == 303
+    html = get(server + "/not-billed?year=2024")
+    assert "Taken off the 2024 list (1)" in html and f"Billed with {company}" in html.replace("&amp;", "&")
+
+
+def test_bills_outside_taxdome(server, tmp_path):
+    from feestracker import db
+    upload(server, FIXTURE.read_bytes())
+    conn = db.connect(tmp_path / "web.db")
+    before = conn.execute("SELECT SUM(total_cents), SUM(collected_cents), SUM(owed_cents) FROM invoice_view").fetchone()
+    post_list(server, "2024", "c.csv", b"Name\nNobody Here\nSam Other\n")
+    html = get(server + "/outside?name=Nobody+Here&name=Sam+Other&year=2024")
+    assert 'value="Nobody Here"' in html and 'value="Sam Other"' in html
+    status = post_multi(server, "/outside", [
+        ("client", "Nobody Here"), ("year", "2024"), ("amount", "500"), ("received", "200"), ("note", "Cash"),
+        ("client", "Sam Other"), ("year", "2024"), ("amount", ""), ("received", ""), ("note", ""),
+        ("billed_on", "2025-03-01"), ("received_on", "2025-03-05")])
+    assert status == 303
+    after = conn.execute("SELECT SUM(total_cents), SUM(collected_cents), SUM(owed_cents) FROM invoice_view").fetchone()
+    assert (after[0] - before[0], after[1] - before[1], after[2] - before[2]) == (50000, 20000, 30000)
+    from feestracker import reports
+    left = [r["name"] for r in reports.not_billed(conn, "2024")["rows"]]
+    assert "Sam Other" in left and "Nobody Here" not in left  # billed for 2024 now
+    assert "outside TaxDome" in get(server + "/client?name=Nobody+Here")
+    assert "Nobody Here" in get(server + "/paid?year=2025")
+    # Survives a new TaxDome import.
+    upload(server, FIXTURE.read_bytes())
+    number = db.outside_bills(conn)[0]["number"]
+    assert number.startswith("OUT-")
+    post_multi(server, "/outside/edit", [("number", number), ("client", "Nobody Here"), ("year", "2024"),
+                                         ("amount", "600"), ("billed_on", "2025-03-01"), ("note", "")])
+    assert db.outside_bills(conn)[0]["total_cents"] == 60000
+    post_multi(server, "/outside/delete", [("number", number)])
+    assert db.outside_bills(conn) == []
+    assert conn.execute("SELECT SUM(total_cents) FROM invoice_view").fetchone()[0] == before[0]

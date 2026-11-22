@@ -88,6 +88,8 @@ fieldset label { margin-right:14px; white-space:nowrap }
 .actions select { font-size:14px }
 .split { display:inline-flex; border:1px solid var(--accent); border-radius:8px; overflow:hidden }
 .split button { border-radius:0; background:var(--card); color:var(--accent) }
+.split input { border:0; border-left:1px solid var(--accent); background:var(--card); color:var(--ink);
+               font:inherit; font-size:14px; padding:0 8px; width:16em }
 .split select { border:0; border-left:1px solid var(--accent); background:var(--card); color:var(--accent);
                 font-weight:600; padding:0 6px; cursor:pointer }
 form.ticked:not(:has(tbody input:checked)) .actions .split { opacity:.45; pointer-events:none }
@@ -113,6 +115,7 @@ NAV = [
 # Used now and then, so shown small at the top right.
 NAV_MORE = [
     ("/import", "Import TaxDome file"),
+    ("/outside", "Billed outside TaxDome"),
     ("/bad-debts", "Bad debts"),
     ("/checks", "Data checks"),
     ("/data", "Update app"),
@@ -359,7 +362,8 @@ TICK_ALL = ("<th class=tick><input type=checkbox title='Tick all' "
             " b.checked = this.checked\"></th>")
 
 
-def client_actions(table: str, back: str, today: date, *, year: str = "", money_actions: bool = False) -> str:
+def client_actions(table: str, back: str, today: date, *, year: str = "", money_actions: bool = False,
+                   companies: list[str] | None = None) -> str:
     """A table of clients with tick boxes, and one bar of buttons for the ticked clients.
 
     No pop-ups: every action can be undone (on the client's page, the Bad debts page,
@@ -377,7 +381,20 @@ def client_actions(table: str, back: str, today: date, *, year: str = "", money_
     if year:
         buttons.append(
             f"<button formaction='/not-billed/not-filed' class=secondary "
-            f"title='Takes them off the {escape(year)} list only'>Didn't file for {escape(year)}</button>")
+            f"title='Takes them off the {escape(year)} list only'>Didn't file for {escape(year)}</button>"
+            "<button formaction='/clients/free' class=secondary "
+            "title='You do their return for free and never bill them. Takes them off every year.'>"
+            "Free return</button>"
+            "<button formaction='/outside' formmethod=get class=secondary "
+            "title='Enter what you billed and received outside TaxDome'>Billed outside TaxDome</button>")
+    if companies is not None:
+        options = "".join(f"<option value=\"{escape(c)}\">" for c in companies)
+        buttons.append(
+            "<span class=group><span class=split><button formaction='/clients/billed-with' "
+            "title='They are billed on this company’s invoice, so they count as billed whenever it is'>"
+            "Billed with company</button>"
+            "<input name=company list=companies placeholder='Type the company name' aria-label='Company'>"
+            f"</span><datalist id=companies>{options}</datalist></span>")
     buttons.append(
         # The year sits inside the button so it reads as part of the action, not a filter.
         f"<span class=group><span class=split><button formaction='/clients/inactive' "
@@ -486,7 +503,10 @@ def client_page(conn: sqlite3.Connection, today: date, name: str) -> bytes:
             ]
             age = f"<div class='small muted'>{label}</div>"
         rows.append(
-            f"<tr><td>{escape(i['number'])}</td><td>{escape(i['invoice_date'][:10])}</td>"
+            f"<tr><td>{escape(i['number'])}"
+            + (f"<div class=small><a href='/outside?edit={quote(i['number'])}'>Edit</a></div>"
+               if db.is_outside(i["number"]) else "")
+            + f"</td><td>{escape(i['invoice_date'][:10])}</td>"
             f"<td><span class='pill {STATUS_CLASS.get(i['status'], '')}'>{escape(i['status'])}</span>{age}</td>"
             f"<td class=small>{services}</td><td class=n>{money(i['total_cents'])}</td>"
             f"<td class='n ok'>{paid_cell(conn, i, name)}</td>"
@@ -772,7 +792,7 @@ def data_page(conn: sqlite3.Connection, db_path: Path, message: str = "") -> byt
 KIND_NOTE = {
     "in_taxdome": "In TaxDome, but no invoice for this tax year",
     "maybe": "Not sure of the TaxDome name",
-    "never": "No invoices in TaxDome at all",
+    "never": "In ATX, never invoiced in TaxDome",
 }
 
 
@@ -806,6 +826,8 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
                    if r["client"] and r["client"].lower() != r["name"].lower() else "")
                 + f"</td><td class=small>{KIND_NOTE[r['kind']]}"
                 + (f": maybe {client_link(r['maybe'])}{same}" if r["maybe"] else "")
+                + (f"<div class='small muted'>Billed with {client_link(r['company'])}, which has no "
+                   f"{escape(year)} invoice</div>" if r.get("company") else "")
                 + f"</td><td class=muted>{escape(', '.join(r['tax_years'])) or '–'}</td>"
                 f"<td class=muted>{escape(r['last_invoice']) or '–'}</td>"
                 f"<td class='n {'owe' if r['owed'] else 'muted'}'>{money(r['owed'])}</td></tr>")
@@ -813,20 +835,20 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
         rows = "".join(row(r) for r in nb["rows"] if r["kind"] != "never")
         never = [r for r in nb["rows"] if r["kind"] == "never"]
         if never:
-            rows += (f"<tr><td colspan=6><details><summary><b>{count(len(never), 'client')} with no invoices in "
-                     "TaxDome at all</b> <span class='small muted'>(maybe never billed in TaxDome, or billed "
-                     "another way). Click to show.</span></summary><table><tbody>"
+            rows += (f"<tr><td colspan=6><details><summary><b>{count(len(never), 'return')} in ATX, never invoiced in "
+                     "TaxDome</b> <span class='small muted'>(free, billed with a company, or billed "
+                     "outside TaxDome? Tick them and use the buttons above). Click to show.</span></summary><table><tbody>"
                      + "".join(row(r) for r in never) + "</tbody></table></details></td></tr>")
         table = f"""
     <div class=cards>
       <div class=card><div class=label>Not billed for {escape(year)}</div>
         <div class="big owe">{len(nb['rows'])}</div>
-        <div class="small muted">of {count(nb['listed'], 'client')} on your {escape(year)} list</div></div>
+        <div class="small muted">of {count(nb['listed'], 'return')} on your ATX {escape(year)} list</div></div>
       <div class=card><div class=label>In TaxDome, no {escape(year)} invoice</div>
         <div class=big>{counts['in_taxdome']}</div></div>
       <div class=card><div class=label>Not sure of TaxDome name</div>
         <div class="big warn">{counts['maybe']}</div></div>
-      <div class=card><div class=label>No invoices in TaxDome</div>
+      <div class=card><div class=label>In ATX, never invoiced in TaxDome</div>
         <div class="big muted">{counts['never']}</div></div>
     </div>
     <p class="small muted">An invoice counts for the tax year written on it (“Tax year {escape(year)}”,
@@ -836,40 +858,131 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
     {client_actions(f"""<div class=wrap><table class=list><thead><tr>{TICK_ALL}<th>Client</th><th>Why it's here</th>
       <th>Tax years billed</th><th>Last invoice</th><th class=n>Owes now</th></tr></thead>
       <tbody>{rows or '<tr><td colspan=6 class=muted>Everyone on this list was billed.</td></tr>'}</tbody>
-    </table></div>""", "/not-billed?year=" + quote(year), today, year=year)}
-    {not_filed_html(conn, year)}"""
+    </table></div>""", "/not-billed?year=" + quote(year), today, year=year, companies=company_names(conn))}
+    {off_list_html(nb["off"], year)}"""
     options = "".join(f"<option{' selected' if y == str(today.year - 1) else ''}>{y}</option>"
                       for y in tax_year_options(today))
-    upload = f"""<h2>Add or replace a client list</h2>
+    upload = f"""<h2>Add or replace an ATX list</h2>
     <form method=post action="/not-billed" enctype="multipart/form-data" class="payform">
       <p><label>Tax year <select name=year>{options}</select></label></p>
-      <p><label>Client list from your tax software (Excel .xlsx or CSV): <input type=file name=file
+      <p><label>Your ATX client list for that tax year (Excel .xlsx or CSV): <input type=file name=file
         accept=".csv,.xlsx,.xlsm,.txt"></label></p>
       <p><label>or paste names, one per line:<br><textarea name=names rows=3></textarea></label></p>
       <p><button>Save list</button> <span class="small muted">Only client names are kept. SSNs, EINs,
         emails and addresses in the file are never saved.</span></p>
-      <p class="small muted">Client lists are kept on their own: saving one never changes your clients,
+      <p class="small muted">ATX lists are kept on their own: saving one never changes your clients,
         invoices, payments or bad debts, and saving a year again only replaces that year's list.</p>
     </form>"""
     body = f"""<h1>Not billed yet{' for tax year ' + escape(year) if year else ''}</h1>
     {message}
-    <p class=muted>Clients on your client list for a tax year who have no TaxDome invoice for that year.</p>
-    {('<p>Tax year: ' + tabs + '</p>') if years else '<div class=note>Add your client list for a tax year below to see who wasn’t billed.</div>'}
+    <p class=muted>Returns on your ATX list for a tax year that have no TaxDome invoice for that year.</p>
+    {('<p>Tax year: ' + tabs + '</p>') if years else '<div class=note>Add your ATX list for a tax year below to see who wasn’t billed.</div>'}
     {table}
     {upload}"""
     return page("Not billed", body, "/not-billed")
 
 
-def not_filed_html(conn: sqlite3.Connection, year: str) -> str:
-    names = db.not_filed(conn, year)
-    if not names:
+def outside_page(conn: sqlite3.Connection, today: date, names: list[str], year: str, edit: str = "",
+                 message: str = "") -> bytes:
+    """Bills you sent outside TaxDome: enter several at once, see, edit or delete them."""
+    years = tax_year_options(today)
+    year = year if year in years else str(today.year - 1)
+    clients = company_names(conn)
+    datalist = "<datalist id=clients>" + "".join(f"<option value=\"{escape(c)}\">" for c in clients) + "</datalist>"
+
+    def year_select(name: str, chosen: str) -> str:
+        return f"<select name={name}>" + "".join(
+            f"<option{' selected' if y == chosen else ''}>{y}</option>" for y in years) + "</select>"
+
+    bills = db.outside_bills(conn)
+    if edit:
+        bill = next((b for b in bills if b["number"] == edit), None)
+        if not bill:
+            return page("Not found", "<h1>Bill not found</h1><p><a href='/outside'>Billed outside TaxDome</a></p>")
+        back = "/client?name=" + quote(bill["client"])
+        body = f"""<p class=small><a href="{escape(back)}">← {escape(bill['client'])}</a></p>
+        <h1>Edit bill {escape(edit)}</h1>
+        <form method=post action="/outside/edit" class=payform>
+          <input type=hidden name=number value="{escape(edit)}">
+          <div class=inline>
+            <label>Client <input name=client list=clients value="{escape(bill['client'])}" size=30 required></label>
+            <label>Tax year {year_select('year', bill['tax_year'])}</label>
+            <label>Billed <input name=amount inputmode=decimal size=10 value="{bill['total_cents'] / 100:.2f}"></label>
+            <label>Billed on <input type=date name=billed_on value="{escape(bill['invoice_date'][:10])}"></label>
+            <label>Note <input name=note value="{escape(bill['note'])}" size=20></label>
+            <button>Save</button></div>{datalist}
+        </form>
+        <p class="small muted">To change what was received, add or delete payments on the
+          <a href="{escape(back)}">client's page</a>.</p>
+        <form method=post action="/outside/delete" class=act><input type=hidden name=number value="{escape(edit)}">
+          <button>Delete this bill and its payments</button></form>"""
+        return page("Edit bill", body, "/outside")
+
+    rows_in = names or [""] * 3
+    entry = "".join(
+        f"<tr><td><input name=client list=clients value=\"{escape(n)}\" size=28 placeholder='Client name'></td>"
+        f"<td>{year_select('year', year)}</td>"
+        "<td><input name=amount inputmode=decimal size=9 placeholder='0.00'></td>"
+        "<td><input name=received inputmode=decimal size=9 placeholder='0.00'></td>"
+        "<td><input name=note size=16 placeholder='Cash, Zelle…'></td></tr>"
+        for n in rows_in)
+    total = sum(b["total_cents"] for b in bills)
+    got = sum(b["paid_cents"] for b in bills)
+    owes_total = sum(b["owed_cents"] for b in bills)
+    listed = "".join(
+        f"<tr><td>{client_link(b['client'])}</td><td>{escape(b['tax_year'])}</td>"
+        f"<td>{escape(b['invoice_date'][:10])}</td><td class=n>{money(b['total_cents'])}</td>"
+        f"<td class='n ok'>{money(b['paid_cents'])}</td>"
+        f"<td class='n {'owe' if b['owed_cents'] else 'muted'}'>{money(b['owed_cents'])}</td>"
+        f"<td class=small>{escape(b['note'])}</td>"
+        f"<td><a href='/outside?edit={quote(b['number'])}'>Edit</a></td></tr>"
+        for b in bills)
+    table = "<p class=muted>None yet.</p>"
+    if bills:
+        table = (
+            "<div class=wrap><table class=list><thead><tr><th>Client</th><th>Tax year</th><th>Billed on</th>"
+            "<th class=n>Billed</th><th class=n>Received</th><th class=n>Owes</th><th>Note</th><th></th></tr></thead>"
+            f"<tbody>{listed}</tbody><tfoot><tr><td colspan=3>Total</td><td class=n>{money(total)}</td>"
+            f"<td class=n>{money(got)}</td><td class=n>{money(owes_total)}</td><td colspan=2></td></tr></tfoot>"
+            "</table></div>")
+    body = f"""<h1>Billed outside TaxDome</h1>
+    {message}
+    <p class=muted>Bills you sent another way, and what you received for them. They count in every total,
+      on Who owes, Who paid and the client's page like a TaxDome invoice, and a TaxDome import never
+      changes them.</p>
+    <h2>Add bills</h2>
+    <form method=post action="/outside" class=payform>
+      <div class=wrap><table><thead><tr><th>Client</th><th>Tax year</th><th class=n>Billed</th>
+        <th class=n>Received</th><th>Note</th></tr></thead><tbody>{entry}</tbody></table></div>
+      <div class=inline style="margin-top:10px">
+        <label>Billed on <input type=date name=billed_on value="{today.isoformat()}" required></label>
+        <label>Received on <input type=date name=received_on value="{today.isoformat()}"></label>
+        <button>Save bills</button>
+        <span class="small muted">Rows left empty are skipped.</span></div>
+      {datalist}
+    </form>
+    <h2>Your bills outside TaxDome ({len(bills)})</h2>
+    {table}"""
+    return page("Billed outside TaxDome", body, "/outside")
+
+
+def company_names(conn: sqlite3.Connection) -> list[str]:
+    """Every client with an invoice, for the name boxes that suggest as you type."""
+    return [r[0] for r in conn.execute("SELECT DISTINCT client FROM invoice_view ORDER BY client COLLATE NOCASE")]
+
+
+def off_list_html(off: list[dict], year: str) -> str:
+    """Clients taken off this year's list (didn't file, free return, billed with a company)."""
+    if not off:
         return ""
-    items = "".join(f"<tr>{tick(n)}<td>{escape(n)}</td></tr>" for n in names)
-    return f"""<h2>Didn't file for {escape(year)} ({len(names)})</h2>
-    <form method=post action="/not-billed/not-filed">
-    <input type=hidden name=year value="{escape(year)}"><input type=hidden name=filed value=1>
+    items = "".join(f"<tr>{tick(r['name'])}<td>{escape(r['name'])}</td><td class=muted>{escape(r['why'])}</td></tr>"
+                    for r in off)
+    return f"""<h2>Taken off the {escape(year)} list ({len(off)})</h2>
+    <form method=post action="/not-billed/put-back">
+    <input type=hidden name=year value="{escape(year)}">
     <input type=hidden name=back value="/not-billed?year={quote(year)}">
-    <div class=wrap><table><thead><tr>{TICK_ALL}<th>Client</th></tr></thead><tbody>{items}</tbody></table></div>
+    <div class=wrap><table class=list><thead><tr>{TICK_ALL}<th>Client</th><th>Why</th></tr></thead>
+      <tbody>{items}</tbody></table></div>
     <p><button>Put ticked clients back on the list</button></p></form>"""
 
 
@@ -894,17 +1007,17 @@ def client_list_found(filename: str, names: list[str], today: date) -> bytes:
     year = guess_tax_year(filename, today)
     options = "".join(f"<option{' selected' if y == year else ''}>{y}</option>"
                       for y in tax_year_options(today))
-    body = f"""<h1>This is a client list</h1>
-    <div class=note>{escape(filename) or 'This file'} is a client list from your tax software, not a
+    body = f"""<h1>This is an ATX list</h1>
+    <div class=note>{escape(filename) or 'This file'} is a client list from ATX, not a
       TaxDome bills export, so it was not imported as bills. Your invoices were not changed.</div>
-    <p>It has {count(len(names), 'client')}. Save it as the client list for a tax year to see who wasn't
+    <p>It has {count(len(names), 'client')}. Save it as the ATX list for a tax year to see who wasn't
       billed. Saving it never changes your clients, invoices, payments or bad debts, and only replaces
       that year's list.</p>
     <form method=post action="/not-billed" enctype="multipart/form-data" class="payform">
       <textarea name=names hidden>{escape(chr(10).join(names))}</textarea>
       <input type=hidden name=source value="{escape(filename)}">
       <p><label>Tax year <select name=year>{options}</select></label>
-        <button>Save as client list</button></p>
+        <button>Save as ATX list</button></p>
     </form>
     <p class="small muted">Only client names are kept. To load your bills, export them in TaxDome from
       Billing → Invoices and <a href="/import">import that file</a>.</p>"""
@@ -1054,6 +1167,9 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                     self._send(checks(conn))
                 elif url.path == "/bad-debts":
                     self._send(bad_debts_page(conn))
+                elif url.path == "/outside":
+                    self._send(outside_page(conn, today, [n for n in multi.get("name", []) if n],
+                                            q.get("year", ""), q.get("edit", "")))
                 else:
                     self._send(page("Not found", "<h1>Page not found</h1>"), status=HTTPStatus.NOT_FOUND)
             finally:
@@ -1097,6 +1213,12 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                 return
             if path == "/payment":
                 self._payment()
+                return
+            if path in ("/clients/free", "/clients/billed-with", "/not-billed/put-back"):
+                self._list_marks(path)
+                return
+            if path in ("/outside", "/outside/edit", "/outside/delete"):
+                self._outside(path)
                 return
             if path != "/import":
                 self._send(page("Not found", "<h1>Page not found</h1>"), status=HTTPStatus.NOT_FOUND)
@@ -1299,6 +1421,105 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                 self._send(data_page(conn, db_path, msg))
             finally:
                 conn.close()
+
+        def _fields(self, limit: int = 1_000_000) -> dict[str, list[str]]:
+            length = min(int(self.headers.get("Content-Length") or 0), limit)
+            return parse_qs(self.rfile.read(length).decode("utf-8"), keep_blank_values=True)
+
+        def _go(self, back: str, default: str = "/"):
+            if not back.startswith("/") or back.startswith("//"):
+                back = default
+            self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
+
+        def _list_marks(self, path: str):
+            """Free return, Billed with company, and putting clients back on a year's list."""
+            fields = self._fields()
+            names = [n for n in fields.get("name", []) if n.strip()]
+            back = (fields.get("back") or ["/not-billed"])[0]
+            if not back.startswith("/") or back.startswith("//"):
+                back = "/not-billed"
+            conn = db.connect(db_path)
+            try:
+                if path == "/clients/free":
+                    db.set_free(conn, names)
+                elif path == "/clients/billed-with":
+                    typed = " ".join((fields.get("company") or [""])[0].split())
+                    found = next((c for c in company_names(conn) if c.lower() == typed.lower()), None)
+                    if not found:
+                        why = (f"There is no client named <b>{escape(typed)}</b>." if typed
+                               else "Please type the company name.")
+                        self._send(page("Not saved", f"<h1>Not saved</h1><p>{why} Pick the company from the "
+                                        f"list that appears as you type. <a href='{escape(back)}'>Go back</a></p>"),
+                                   status=HTTPStatus.BAD_REQUEST)
+                        return
+                    db.link_billed_with(conn, names, found)
+                else:
+                    year = (fields.get("year") or [""])[0]
+                    if year:
+                        db.mark_not_filed(conn, year, names, filed=True)
+                    db.set_free(conn, names, free=False)
+                    db.unlink_billed_with(conn, names)
+            finally:
+                conn.close()
+            self._go(back, "/not-billed")
+
+        def _outside(self, path: str):
+            """Add, edit or delete bills outside TaxDome."""
+            fields = self._fields()
+            form = {k: v[0] for k, v in fields.items()}
+            years = tax_year_options(today_fn())
+            conn = db.connect(db_path)
+            try:
+                def again(text: str):
+                    self._send(outside_page(conn, today_fn(), fields.get("client", []),
+                                            (fields.get("year") or [""])[0],
+                                            message=f"<div class='note owe'>{text} Nothing was saved.</div>"),
+                               status=HTTPStatus.BAD_REQUEST)
+
+                if path == "/outside/delete":
+                    number = form.get("number", "")
+                    client = conn.execute("SELECT client FROM invoices WHERE number = ?", (number,)).fetchone()
+                    db.delete_outside_bill(conn, number)
+                    return self._go("/client?name=" + quote(client[0]) if client else "/outside")
+                billed_on = form.get("billed_on", "")
+                try:
+                    date.fromisoformat(billed_on)
+                except ValueError:
+                    return again("Please choose the date it was billed.")
+                if path == "/outside/edit":
+                    cents = parse_amount(form.get("amount", ""))
+                    if cents is None or not form.get("client", "").strip() or form.get("year") not in years:
+                        return again("Please fill in the client, tax year and amount billed.")
+                    db.update_outside_bill(conn, form.get("number", ""), form["client"], form["year"], cents,
+                                           billed_on, form.get("note", ""))
+                    return self._go("/client?name=" + quote(" ".join(form["client"].split())))
+                received_on = form.get("received_on", "") or billed_on
+                try:
+                    date.fromisoformat(received_on)
+                except ValueError:
+                    return again("Please choose the date it was received.")
+                cols = [fields.get(k, []) for k in ("client", "year", "amount", "received", "note")]
+                to_save = []
+                for client, year, amount, received, note in zip(*cols):
+                    if not (amount.strip() or received.strip()):
+                        continue  # an empty row, or a name with nothing entered
+                    cents = parse_amount(amount) if amount.strip() else 0
+                    got = parse_amount(received) if received.strip() else 0
+                    if not client.strip():
+                        return again("A row has an amount but no client name.")
+                    if cents is None or got is None:
+                        return again(f"Please enter amounts such as 500 or 1,250.50 for {escape(client)}.")
+                    if year not in years:
+                        return again("Please choose a tax year.")
+                    # Received but nothing typed under Billed: they were billed what they paid.
+                    to_save.append((client, year, cents or got, got, note))
+                if not to_save:
+                    return again("Please enter an amount in at least one row.")
+                for client, year, cents, got, note in to_save:
+                    db.add_outside_bill(conn, client, year, cents, billed_on, note, got, received_on)
+            finally:
+                conn.close()
+            self._go("/outside")
 
         def _payment(self):
             length = min(int(self.headers.get("Content-Length") or 0), 100_000)

@@ -376,23 +376,37 @@ def not_billed(conn: sqlite3.Connection, year: str) -> dict:
     removed = set(db.removed_clients(conn))
     confirmed = db.name_matches(conn)
     rejected = db.not_matches(conn)
-    skipped = set(db.not_filed(conn, year))
-    skipped |= {n for n, y in db.inactive_clients(conn).items() if y <= year}
-    rows = []
+    with_company = db.billed_with(conn)
+    not_filed = set(db.not_filed(conn, year))
+    free = set(db.free_clients(conn))
+    inactive = {n for n, y in db.inactive_clients(conn).items() if y <= year}
+    rows, off = [], []
     for name in names:
         m = taxdome.best(name, rejected.get(name, frozenset()))
         client = m.found if m.same else None
         if confirmed.get(name) in years:
             client = confirmed[name]
-        if name in removed or client in removed or name in skipped or client in skipped:
+        if name in removed or client in removed or name in inactive or client in inactive:
+            continue
+        shown = client or name
+        if name in free or client in free:
+            off.append({"name": shown, "why": "Free return"})
+            continue
+        if name in not_filed or client in not_filed:
+            off.append({"name": shown, "why": f"Didn't file for {year}"})
             continue
         billed = sorted(years.get(client, set())) if client else []
         if year in billed:
             continue
+        company = with_company.get(client or "") or with_company.get(name)
+        if company and year in years.get(company, set()):
+            off.append({"name": shown, "why": f"Billed with {company}", "company": company})
+            continue
         kind = "in_taxdome" if client else ("maybe" if m.maybe else "never")
         rows.append({"name": name, "client": client, "maybe": m.found if kind == "maybe" else None,
                      "kind": kind, "tax_years": billed, "last_invoice": (last.get(client) or "")[:10],
-                     "owed": owed.get(client, 0) if client else 0})
+                     "owed": owed.get(client, 0) if client else 0, "company": company})
     order = {"in_taxdome": 0, "maybe": 1, "never": 2}
     rows.sort(key=lambda r: (order[r["kind"]], r["name"].lower()))
-    return {"year": year, "listed": len(names), "rows": rows}
+    off.sort(key=lambda r: (r["why"], r["name"].lower()))
+    return {"year": year, "listed": len(names), "rows": rows, "off": off}
