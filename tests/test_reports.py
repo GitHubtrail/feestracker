@@ -187,7 +187,9 @@ def test_obvious_name_variants_match():
     assert m.best("Fare Fund Llc").found == "FareFund LLC" and m.best("Fare Fund Llc").same
     assert m.best("Hy Line Dental Associates Pc").same
     assert m.best("Rohan Chauhan").found == "Chauhan Rohanbhai" and m.best("Rohan Chauhan").same
-    assert m.best("Ali Khan").found == "Ali Khan DDS PC" and m.best("Ali Khan").same
+    assert m.best("Ali Khan Dds Pc").same
+    # A person is not their practice, and a couple is not a company.
+    assert m.best("Ali Khan").found != "Ali Khan DDS PC"
     assert m.best("Hetalkumar Patel and Bhavini Patel").same
     assert not m.best("Kumar Patel").same
 

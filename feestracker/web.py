@@ -35,11 +35,19 @@ STYLE = """
 * { box-sizing:border-box }
 body { margin:0; background:var(--bg); color:var(--ink);
        font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif }
-header { background:var(--card); border-bottom:1px solid var(--line); padding:12px 16px }
-header nav { max-width:1100px; margin:0 auto; display:flex; flex-wrap:wrap; gap:4px 18px; align-items:center }
-header b { margin-right:12px; font-size:18px }
+header { background:var(--card); border-bottom:1px solid var(--line); padding:10px 16px 0 }
+header .top, header nav { max-width:1100px; margin:0 auto; display:flex; flex-wrap:wrap; align-items:center }
+header .top { gap:4px 14px; margin-bottom:8px }
+header b { font-size:18px; margin-right:auto }
+header .tools { display:flex; flex-wrap:wrap; gap:4px 14px; font-size:14px }
+header .tools span { color:var(--muted) }
+header .tools a { color:var(--muted) } header .tools a.on { color:var(--accent); font-weight:600 }
+header nav { gap:4px }
+header nav a { padding:8px 14px; border-radius:8px 8px 0 0; color:var(--ink); font-weight:550;
+               border:1px solid transparent; border-bottom:0; margin-bottom:-1px }
+header nav a:hover { background:var(--bg); text-decoration:none }
+header nav a.on { background:var(--bg); border-color:var(--line); color:var(--accent) }
 a { color:var(--accent); text-decoration:none } a:hover { text-decoration:underline }
-nav a.on { font-weight:600; text-decoration:underline }
 main { max-width:1100px; margin:0 auto; padding:20px 16px 60px }
 h1 { font-size:24px; margin:4px 0 16px } h2 { font-size:19px; margin:28px 0 10px }
 .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px }
@@ -78,29 +86,33 @@ fieldset label { margin-right:14px; white-space:nowrap }
 .actions button { padding:5px 12px; font-size:14px }
 .actions .group { display:inline-flex; gap:6px; align-items:center; border-left:1px solid var(--line); padding-left:10px }
 .actions select { font-size:14px }
+.split { display:inline-flex; border:1px solid var(--accent); border-radius:8px; overflow:hidden }
+.split button { border-radius:0; background:var(--card); color:var(--accent) }
+.split select { border:0; border-left:1px solid var(--accent); background:var(--card); color:var(--accent);
+                font-weight:600; padding:0 6px; cursor:pointer }
+form.ticked:not(:has(tbody input:checked)) .actions .split { opacity:.45; pointer-events:none }
 button.secondary { background:var(--card); color:var(--accent); border:1px solid var(--accent) }
 button.link { background:transparent; color:var(--accent); padding:5px 6px }
 form.ticked:not(:has(tbody input:checked)) .actions button { opacity:.45; pointer-events:none }
 input.filter { font:inherit; padding:7px 10px; border:1px solid var(--line); border-radius:8px; width:min(100%,360px);
                background:var(--card); color:var(--ink); margin:0 0 10px }
-nav .more { margin-left:auto; display:flex; gap:14px; font-size:14px }
-nav .more a { color:var(--muted) } nav .more a.on { color:var(--accent) }
 """
 
 # The years asked to follow up on first.
 DEFAULT_UNPAID_YEARS = ("2023", "2024")
 
+# The everyday pages, as tabs: what's owed, what came in, who still needs a bill.
 NAV = [
     ("/", "Summary"),
     ("/owes", "Who owes"),
-    ("/unpaid", "Unpaid by year"),
-    ("/not-billed", "Not billed"),
+    ("/unpaid", "Owed by year"),
     ("/paid", "Who paid"),
+    ("/not-billed", "Not billed yet"),
     ("/clients", "All clients"),
 ]
-# Used now and then, so shown smaller on the right.
+# Used now and then, so shown small at the top right.
 NAV_MORE = [
-    ("/import", "Import from TaxDome"),
+    ("/import", "Import TaxDome file"),
     ("/bad-debts", "Bad debts"),
     ("/checks", "Data checks"),
     ("/data", "Update app"),
@@ -116,18 +128,16 @@ def money(cents: int | None) -> str:
 
 
 def page(title: str, body: str, active: str = "") -> bytes:
-    links = "".join(
-        f'<a href="{href}" class="{"on" if href == active else ""}">{label}</a>'
-        for href, label in NAV
-    ) + "<span class=more>" + "".join(
-        f'<a href="{href}" class="{"on" if href == active else ""}">{label}</a>'
-        for href, label in NAV_MORE
-    ) + "</span>"
+    def link(href: str, label: str) -> str:
+        return f'<a href="{href}" class="{"on" if href == active else ""}">{label}</a>'
+    tabs = "".join(link(h, l) for h, l in NAV)
+    tools = "<span>Tools:</span>" + "".join(link(h, l) for h, l in NAV_MORE)
     return (
         "<!doctype html><html lang=en><head><meta charset=utf-8>"
         '<meta name=viewport content="width=device-width,initial-scale=1">'
         f"<title>{escape(title)} · Fees Tracker</title><style>{STYLE}</style></head>"
-        f"<body><header><nav><b>Fees Tracker</b>{links}</nav></header>"
+        f"<body><header><div class=top><b>Fees Tracker</b><div class=tools>{tools}</div></div>"
+        f"<nav>{tabs}</nav></header>"
         f"<main>{body}<p class='small muted' style='margin-top:40px'>Fees Tracker version {__version__}</p>"
         "</main></body></html>"
     ).encode("utf-8")
@@ -369,8 +379,10 @@ def client_actions(table: str, back: str, today: date, *, year: str = "", money_
             f"<button formaction='/not-billed/not-filed' class=secondary "
             f"title='Takes them off the {escape(year)} list only'>Didn't file for {escape(year)}</button>")
     buttons.append(
-        f"<span class=group><span class=small>No longer my client from</span> <select name=from_year>{options}</select>"
-        "<button formaction='/clients/inactive' class=secondary>Inactive</button>"
+        # The year sits inside the button so it reads as part of the action, not a filter.
+        f"<span class=group><span class=split><button formaction='/clients/inactive' "
+        f"title='Leaves the Not billed list from this tax year on'>Mark inactive from</button>"
+        f"<select name=from_year aria-label='Tax year'>{options}</select></span>"
         "<button formaction='/clients/inactive' name=active value=1 class=link>Make active</button></span>")
     buttons.append("<button class=link title='Hides them from every page and total'>Remove</button>")
     bar = f"""<div class=actions><span class=small><b>Ticked clients:</b></span> {' '.join(buttons)}</div>"""
@@ -683,7 +695,7 @@ def unpaid(conn: sqlite3.Connection, chosen: list[str], today: date | None = Non
     )
     totals = "".join(f"<td class=n>{money(sum(c['by_year'][y] for c in found))}</td>" for y in chosen)
     query = "&".join(f"year={quote(y)}" for y in chosen)
-    body = f"""<h1>Unpaid by year</h1>
+    body = f"""<h1>Owed by year</h1>
     <form method=get action="/unpaid"><fieldset><legend>Invoices from</legend>
       {year_checkboxes('year', all_years, chosen)} <button>Show</button></fieldset></form>
     <p class="small muted">Clients who still owe on invoices dated in {escape(' or '.join(chosen))}.
@@ -697,7 +709,7 @@ def unpaid(conn: sqlite3.Connection, chosen: list[str], today: date | None = Non
       <td class='n owe'>{money(sum(c['owed'] for c in found))}</td>
       <td class=n>{sum(c['invoices'] for c in found)}</td><td></td></tr></tfoot></table></div>""",
       "/unpaid?" + query, today, money_actions=True)}"""
-    return page("Unpaid by year", body, "/unpaid")
+    return page("Owed by year", body, "/unpaid")
 
 
 def unpaid_csv(conn: sqlite3.Connection, chosen: list[str]) -> bytes:
@@ -783,8 +795,11 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
         def row(r: dict) -> str:
             same = ""
             if r["maybe"]:
+                pair = escape(r['name'] + chr(9) + r['maybe'])
                 same = (f" <button class=small formaction='/not-billed/match' name=match "
-                        f"value=\"{escape(r['name'] + chr(9) + r['maybe'])}\">Same client</button>")
+                        f"value=\"{pair}\">Same client</button>"
+                        f" <button class='small secondary' formaction='/not-billed/not-match' name=match "
+                        f"value=\"{pair}\">Not the same</button>")
             return (
                 f"<tr>{tick(r['client'] or r['name'])}<td>{client_link(r['client']) if r['client'] else escape(r['name'])}"
                 + (f"<div class='small muted'>On your list as {escape(r['name'])}</div>"
@@ -836,7 +851,7 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
       <p class="small muted">Client lists are kept on their own: saving one never changes your clients,
         invoices, payments or bad debts, and saving a year again only replaces that year's list.</p>
     </form>"""
-    body = f"""<h1>Not billed{' for tax year ' + escape(year) if year else ''}</h1>
+    body = f"""<h1>Not billed yet{' for tax year ' + escape(year) if year else ''}</h1>
     {message}
     <p class=muted>Clients on your client list for a tax year who have no TaxDome invoice for that year.</p>
     {('<p>Tax year: ' + tabs + '</p>') if years else '<div class=note>Add your client list for a tax year below to see who wasn’t billed.</div>'}
@@ -1071,8 +1086,8 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
             if path == "/not-billed/not-filed":
                 self._not_filed()
                 return
-            if path == "/not-billed/match":
-                self._confirm_match()
+            if path in ("/not-billed/match", "/not-billed/not-match"):
+                self._confirm_match(same=path == "/not-billed/match")
                 return
             if path in ("/clients/remove", "/clients/restore"):
                 self._remove_clients(path)
@@ -1193,7 +1208,7 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                     conn.close()
             self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
 
-        def _confirm_match(self):
+        def _confirm_match(self, same: bool = True):
             length = min(int(self.headers.get("Content-Length") or 0), 1_000_000)
             fields = parse_qs(self.rfile.read(length).decode("utf-8"))
             name, _, client = (fields.get("match") or [""])[0].partition("\t")
@@ -1203,7 +1218,7 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
             if name and client:
                 conn = db.connect(db_path)
                 try:
-                    db.confirm_match(conn, name, client)
+                    (db.confirm_match if same else db.reject_match)(conn, name, client)
                 finally:
                     conn.close()
             self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
