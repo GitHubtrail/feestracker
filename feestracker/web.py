@@ -73,6 +73,18 @@ fieldset label { margin-right:14px; white-space:nowrap }
 .payform input[type=checkbox] { width:18px; height:18px }
 .payform .inline { display:flex; flex-wrap:wrap; gap:10px 16px; align-items:center }
 .stack > * { margin:0 0 10px }
+.actions { position:sticky; top:0; z-index:2; display:flex; flex-wrap:wrap; gap:8px; align-items:center;
+           background:var(--bg); padding:8px 0; margin:0 0 6px }
+.actions button { padding:5px 12px; font-size:14px }
+.actions .group { display:inline-flex; gap:6px; align-items:center; border-left:1px solid var(--line); padding-left:10px }
+.actions select { font-size:14px }
+button.secondary { background:var(--card); color:var(--accent); border:1px solid var(--accent) }
+button.link { background:transparent; color:var(--accent); padding:5px 6px }
+form.ticked:not(:has(tbody input:checked)) .actions button { opacity:.45; pointer-events:none }
+input.filter { font:inherit; padding:7px 10px; border:1px solid var(--line); border-radius:8px; width:min(100%,360px);
+               background:var(--card); color:var(--ink); margin:0 0 10px }
+nav .more { margin-left:auto; display:flex; gap:14px; font-size:14px }
+nav .more a { color:var(--muted) } nav .more a.on { color:var(--accent) }
 """
 
 # The years asked to follow up on first.
@@ -85,10 +97,13 @@ NAV = [
     ("/not-billed", "Not billed"),
     ("/paid", "Who paid"),
     ("/clients", "All clients"),
-    ("/import", "Import"),
+]
+# Used now and then, so shown smaller on the right.
+NAV_MORE = [
+    ("/import", "Import from TaxDome"),
     ("/bad-debts", "Bad debts"),
     ("/checks", "Data checks"),
-    ("/data", "Your data & updates"),
+    ("/data", "Update app"),
 ]
 
 
@@ -104,7 +119,10 @@ def page(title: str, body: str, active: str = "") -> bytes:
     links = "".join(
         f'<a href="{href}" class="{"on" if href == active else ""}">{label}</a>'
         for href, label in NAV
-    )
+    ) + "<span class=more>" + "".join(
+        f'<a href="{href}" class="{"on" if href == active else ""}">{label}</a>'
+        for href, label in NAV_MORE
+    ) + "</span>"
     return (
         "<!doctype html><html lang=en><head><meta charset=utf-8>"
         '<meta name=viewport content="width=device-width,initial-scale=1">'
@@ -229,7 +247,7 @@ def owes(conn: sqlite3.Connection, today: date, year: str) -> bytes:
     total = sum(c["owed"] for c in owing)
     heads = "".join(f"<th class=n>{label}</th>" for _k, label, *_ in reports.AGE_BUCKETS)
     rows = "".join(
-        f"<tr><td>{client_link(c['client'])}</td><td class='n owe'><b>{money(c['owed'])}</b></td>"
+        f"<tr>{tick(c['client'])}<td>{client_link(c['client'])}</td><td class='n owe'><b>{money(c['owed'])}</b></td>"
         + "".join(
             f"<td class=n>{money(c[k]) if c[k] else '<span class=muted>–</span>'}</td>"
             for k, *_ in reports.AGE_BUCKETS
@@ -238,7 +256,7 @@ def owes(conn: sqlite3.Connection, today: date, year: str) -> bytes:
         for c in owing
     )
     foot = (
-        f"<tr><td>Total ({len(owing)} clients)</td><td class='n owe'>{money(total)}</td>"
+        f"<tr><td></td><td>Total ({len(owing)} clients)</td><td class='n owe'>{money(total)}</td>"
         + "".join(f"<td class=n>{money(ages[k])}</td>" for k, *_ in reports.AGE_BUCKETS)
         + f"<td class=n>{sum(c['invoices'] for c in owing)}</td><td></td></tr>"
     )
@@ -247,10 +265,12 @@ def owes(conn: sqlite3.Connection, today: date, year: str) -> bytes:
     {year_picker('/owes', reports.years(conn), year, 'Invoice year')}
     <p class="small muted">Age is counted from the invoice date. Click a client to see their
       invoices and a ready-to-send payment reminder. <a href="{csv_link}">Download this list (CSV)</a></p>
-    <div class=wrap><table><thead><tr><th>Client</th><th class=n>Owes</th>{heads}
+    {FILTER}
+    {client_actions(f"""<div class=wrap><table class=list><thead><tr>{TICK_ALL}<th>Client</th><th class=n>Owes</th>{heads}
       <th class=n>Invoices</th><th>Oldest</th></tr></thead>
-      <tbody>{rows or '<tr><td colspan=8 class=muted>Nobody owes anything here.</td></tr>'}</tbody>
-      <tfoot>{foot}</tfoot></table></div>"""
+      <tbody>{rows or '<tr><td colspan=9 class=muted>Nobody owes anything here.</td></tr>'}</tbody>
+      <tfoot>{foot}</tfoot></table></div>""", "/owes" + (f"?year={quote(year)}" if year else ""), today,
+      money_actions=True)}"""
     return page("Who owes", body, "/owes")
 
 
@@ -329,32 +349,42 @@ TICK_ALL = ("<th class=tick><input type=checkbox title='Tick all' "
             " b.checked = this.checked\"></th>")
 
 
-def remove_form(table: str, back: str, year: str = "", inactive_controls: list[str] | None = None) -> str:
-    """A table of clients with tick boxes and one button to remove the ticked ones
-    (and, on a tax year's Not billed list, one to say you didn't file them that year)."""
-    skip = ""
+def client_actions(table: str, back: str, today: date, *, year: str = "", money_actions: bool = False) -> str:
+    """A table of clients with tick boxes, and one bar of buttons for the ticked clients.
+
+    No pop-ups: every action can be undone (on the client's page, the Bad debts page,
+    the Removed clients list or the Didn't file list)."""
+    years = tax_year_options(today)
+    chosen = year if year in years else str(today.year - 1)
+    options = "".join(f"<option{' selected' if y == chosen else ''}>{y}</option>" for y in years)
+    buttons = []
+    if money_actions:
+        buttons.append(
+            "<button formaction='/clients/paid' title='Records a payment for everything they owe, dated today'>"
+            "Paid in full</button>"
+            "<button formaction='/clients/bad-debt' class=secondary title='Writes off everything they owe'>"
+            "Bad debt</button>")
     if year:
-        skip = f"""<input type=hidden name=year value="{escape(year)}">
-    <p><button formaction="/not-billed/not-filed">Didn't file for {escape(year)}</button>
-      <span class="small muted">Takes the ticked clients off the {escape(year)} list only. Nothing else
-      changes.</span></p>
-    <p><button formaction="/clients/inactive" name=from_year value="{escape(year)}">No longer my client
-      from {escape(year)}</button> <span class="small muted">Marks them inactive from {escape(year)} on, so
-      they leave this and later years' lists. Their invoices, payments and bad debts stay as they are.</span></p>"""
-    if inactive_controls:
-        options = "".join(f"<option{' selected' if i == 1 else ''}>{y}</option>"
-                          for i, y in enumerate(inactive_controls))
-        skip += f"""<p><span class="small">No longer your client? Tax year</span> <select name=from_year>{options}</select>
-      <button formaction="/clients/inactive">Inactive from this tax year</button>
-      <button formaction="/clients/inactive" name=active value=1>Make active again</button>
-      <span class="small muted">For the ticked clients. Their invoices and bad debts stay as they are.</span></p>"""
-    return f"""<form method=post action="/clients/remove">
+        buttons.append(
+            f"<button formaction='/not-billed/not-filed' class=secondary "
+            f"title='Takes them off the {escape(year)} list only'>Didn't file for {escape(year)}</button>")
+    buttons.append(
+        f"<span class=group><span class=small>No longer my client from</span> <select name=from_year>{options}</select>"
+        "<button formaction='/clients/inactive' class=secondary>Inactive</button>"
+        "<button formaction='/clients/inactive' name=active value=1 class=link>Make active</button></span>")
+    buttons.append("<button class=link title='Hides them from every page and total'>Remove</button>")
+    bar = f"""<div class=actions><span class=small><b>Ticked clients:</b></span> {' '.join(buttons)}</div>"""
+    return f"""<form method=post action="/clients/remove" class=ticked>
     <input type=hidden name=back value="{escape(back)}">
+    {f'<input type=hidden name=year value="{escape(year)}">' if year else ''}
+    {bar}
     {table}
-    {skip}
-    <p><button>Remove ticked clients</button> <span class="small muted">They are hidden from every
-      page and total, and stay hidden after a new import. You can put them back on All clients.</span></p>
     </form>"""
+
+
+FILTER = ("<input type=search class=filter placeholder='Type a name to find a client' "
+          "oninput=\"const q=this.value.toLowerCase();for(const r of document.querySelectorAll('table.list > tbody > tr'))"
+          "r.hidden=q&&!r.textContent.toLowerCase().includes(q)\">")
 
 
 def all_clients(conn: sqlite3.Connection, q: str, message: str = "", today: date | None = None) -> bytes:
@@ -370,7 +400,7 @@ def all_clients(conn: sqlite3.Connection, q: str, message: str = "", today: date
         for c in reports.clients(conn, q)
     )
     back = "/clients" + (f"?q={quote(q)}" if q else "")
-    table = f"""<div class=wrap><table><thead><tr>{TICK_ALL}<th>Client</th><th class=n>Invoices</th>
+    table = f"""<div class=wrap><table class=list><thead><tr>{TICK_ALL}<th>Client</th><th class=n>Invoices</th>
       <th class=n>Billed</th><th class=n>Paid</th><th class=n>Owes</th></tr></thead>
       <tbody>{rows or '<tr><td colspan=6 class=muted>No clients found.</td></tr>'}</tbody></table></div>"""
     removed = db.removed_clients(conn)
@@ -383,10 +413,9 @@ def all_clients(conn: sqlite3.Connection, q: str, message: str = "", today: date
     <p><button>Put ticked clients back</button></p></form>"""
     body = f"""<h1>All clients</h1>
     {message}
-    <form class=inline method=get action="/clients">
-      <input type=search name=q value="{escape(q)}" placeholder="Search by name" autofocus>
-      <button>Search</button></form>
-    {remove_form(table, back, inactive_controls=tax_year_options(today))}
+    <p class="small muted">Tick clients to act on them, or click a name to see their invoices.</p>
+    {FILTER}
+    {client_actions(table, back, today, money_actions=True)}
     {removed_html}"""
     return page("All clients", body, "/clients")
 
@@ -460,8 +489,7 @@ def client_page(conn: sqlite3.Connection, today: date, name: str) -> bytes:
         <p><button type=button onclick="navigator.clipboard.writeText(
           document.getElementById('reminder').value).then(()=>{{this.textContent='Copied'}})">Copy reminder</button></p>"""
     body = f"""<p class=small><a href="/clients">← All clients</a></p>
-    <h1>{escape(name)}</h1>
-    {inactive_box(conn, name, today)}
+    <h1>{escape(name)}{inactive_badge(conn, name)}</h1>
     <div class=cards>
       <div class=card><div class=label>Owes</div><div class="big {'owe' if owed else 'muted'}">{money(owed)}</div>
         <div class="small muted">{len(open_invs)} open invoices</div>
@@ -475,8 +503,15 @@ def client_page(conn: sqlite3.Connection, today: date, name: str) -> bytes:
     <h2>Invoices</h2>
     <div class=wrap><table><thead><tr><th>Invoice</th><th>Date</th><th>Status</th><th>Services</th>
       <th class=n>Total</th><th class=n>Paid</th><th class=n>Owes</th></tr></thead>
-      <tbody>{''.join(rows)}</tbody></table></div>"""
+      <tbody>{''.join(rows)}</tbody></table></div>
+    <h2>More</h2>
+    {inactive_box(conn, name, today)}"""
     return page(name, body)
+
+
+def inactive_badge(conn: sqlite3.Connection, name: str) -> str:
+    since = db.inactive_clients(conn).get(name)
+    return f" <span class='pill muted small'>inactive from {escape(since)}</span>" if since else ""
 
 
 def inactive_box(conn: sqlite3.Connection, name: str, today: date) -> str:
@@ -628,7 +663,8 @@ def year_checkboxes(name: str, years: list[str], chosen: list[str]) -> str:
     )
 
 
-def unpaid(conn: sqlite3.Connection, chosen: list[str]) -> bytes:
+def unpaid(conn: sqlite3.Connection, chosen: list[str], today: date | None = None) -> bytes:
+    today = today or date.today()
     all_years = [y for y in reports.years(conn)]
     if not chosen:
         chosen = [y for y in DEFAULT_UNPAID_YEARS if y in all_years] or all_years[1:3]
@@ -636,7 +672,7 @@ def unpaid(conn: sqlite3.Connection, chosen: list[str]) -> bytes:
     found = reports.unpaid_by_years(conn, chosen)
     heads = "".join(f"<th class=n>{escape(y)}</th>" for y in chosen)
     rows = "".join(
-        f"<tr><td>{client_link(c['client'])}</td>"
+        f"<tr>{tick(c['client'])}<td>{client_link(c['client'])}</td>"
         + "".join(
             f"<td class=n>{money(c['by_year'][y]) if c['by_year'][y] else '<span class=muted>–</span>'}</td>"
             for y in chosen
@@ -653,12 +689,14 @@ def unpaid(conn: sqlite3.Connection, chosen: list[str]) -> bytes:
     <p class="small muted">Clients who still owe on invoices dated in {escape(' or '.join(chosen))}.
       Bad debts are left out. Click a client for their invoices and a payment reminder.
       <a href="/unpaid.csv?{query}">Download this list (CSV)</a></p>
-    <div class=wrap><table><thead><tr><th>Client</th>{heads}<th class=n>Total unpaid</th>
+    {FILTER}
+    {client_actions(f"""<div class=wrap><table class=list><thead><tr>{TICK_ALL}<th>Client</th>{heads}<th class=n>Total unpaid</th>
       <th class=n>Invoices</th><th>Last payment</th></tr></thead>
-      <tbody>{rows or f'<tr><td colspan={len(chosen) + 4} class=muted>Nobody owes on invoices from these years.</td></tr>'}</tbody>
-      <tfoot><tr><td>Total ({count(len(found), 'client')})</td>{totals}
+      <tbody>{rows or f'<tr><td colspan={len(chosen) + 5} class=muted>Nobody owes on invoices from these years.</td></tr>'}</tbody>
+      <tfoot><tr><td></td><td>Total ({count(len(found), 'client')})</td>{totals}
       <td class='n owe'>{money(sum(c['owed'] for c in found))}</td>
-      <td class=n>{sum(c['invoices'] for c in found)}</td><td></td></tr></tfoot></table></div>"""
+      <td class=n>{sum(c['invoices'] for c in found)}</td><td></td></tr></tfoot></table></div>""",
+      "/unpaid?" + query, today, money_actions=True)}"""
     return page("Unpaid by year", body, "/unpaid")
 
 
@@ -780,10 +818,10 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
       “TY {escape(year)}”, “{escape(year)} tax return”). If none is written, it counts for the year before
       the invoice date, because {escape(year)} returns are usually billed in {int(year) + 1}.
       <a href="/not-billed.csv?year={quote(year)}">Download this list (CSV)</a></p>
-    {remove_form(f"""<div class=wrap><table><thead><tr>{TICK_ALL}<th>Client</th><th>Why it's here</th>
+    {client_actions(f"""<div class=wrap><table class=list><thead><tr>{TICK_ALL}<th>Client</th><th>Why it's here</th>
       <th>Tax years billed</th><th>Last invoice</th><th class=n>Owes now</th></tr></thead>
       <tbody>{rows or '<tr><td colspan=6 class=muted>Everyone on this list was billed.</td></tr>'}</tbody>
-    </table></div>""", "/not-billed?year=" + quote(year), year)}
+    </table></div>""", "/not-billed?year=" + quote(year), today, year=year)}
     {not_filed_html(conn, year)}"""
     options = "".join(f"<option{' selected' if y == str(today.year - 1) else ''}>{y}</option>"
                       for y in tax_year_options(today))
@@ -974,7 +1012,7 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                     self._send(owes_csv(conn, today, year), "text/csv; charset=utf-8",
                                extra={"Content-Disposition": f'attachment; filename="{name}"'})
                 elif url.path == "/unpaid":
-                    self._send(unpaid(conn, multi.get("year", [])))
+                    self._send(unpaid(conn, multi.get("year", []), today))
                 elif url.path == "/unpaid.csv":
                     self._send(unpaid_csv(conn, multi.get("year", [])), "text/csv; charset=utf-8",
                                extra={"Content-Disposition":
@@ -1023,6 +1061,9 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                 return
             if path == "/not-billed":
                 self._save_list()
+                return
+            if path in ("/clients/paid", "/clients/bad-debt"):
+                self._settle(path)
                 return
             if path == "/clients/inactive":
                 self._inactive()
@@ -1096,6 +1137,29 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
             back = form.get("back", "/")
             if not back.startswith("/") or back.startswith("//"):
                 back = "/"
+            self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
+
+        def _settle(self, path: str):
+            """Paid in full, or written off as bad debt, for everything the ticked clients owe."""
+            length = min(int(self.headers.get("Content-Length") or 0), 1_000_000)
+            fields = parse_qs(self.rfile.read(length).decode("utf-8"))
+            back = (fields.get("back") or ["/owes"])[0]
+            if not back.startswith("/") or back.startswith("//"):
+                back = "/owes"
+            names = set(fields.get("name", []))
+            conn = db.connect(db_path)
+            try:
+                today = today_fn().isoformat()
+                for name in names:
+                    for inv in reports.client_invoices(conn, name):
+                        if inv["owed_cents"] <= 0:
+                            continue
+                        if path == "/clients/paid":
+                            db.add_payment(conn, inv["number"], inv["owed_cents"], today, "Marked paid in full")
+                        else:
+                            db.mark_bad_debt(conn, inv["number"], "Marked from a client list")
+            finally:
+                conn.close()
             self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
 
         def _inactive(self):
