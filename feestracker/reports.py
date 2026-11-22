@@ -366,15 +366,26 @@ def client_tax_years(conn: sqlite3.Connection) -> dict[str, set[str]]:
     for r in conn.execute("SELECT invoice_number, title FROM line_items WHERE kind = 'service'"):
         titles.setdefault(r["invoice_number"], []).append(r["title"])
     out: dict[str, set[str]] = {}
+    guessed: dict[str, set[str]] = {}  # years taken by invoices with no year written
     for r in conn.execute("SELECT number, client, invoice_date, description FROM invoices "
                           "WHERE number NOT IN (SELECT number FROM removed_invoices) "
                           "ORDER BY client, invoice_date, number"):
         seen = out.setdefault(r["client"], set())
+        inferred = guessed.setdefault(r["client"], set())
         years = tax_years_of(r["description"] or "", r["invoice_date"], titles.get(r["number"], []))
         billed_in = r["invoice_date"][:4]
         if (billed_in.isdigit() and years and years <= seen
                 and all(int(y) < int(billed_in) - 1 for y in years)):
             years = {str(int(billed_in) - 1)}
+        if not named_tax_years(r["description"] or "", titles.get(r["number"], [])) and len(years) == 1:
+            # A second invoice for the same year, with no year written on either, after
+            # a skipped year: one of them is the late return for the skipped year
+            # (billed for 2023, then twice in 2026 = 2024 and 2025).
+            y = int(next(iter(years)))
+            if (str(y) in seen and str(y - 1) not in seen and str(y) in inferred
+                    and any(int(x) < y - 1 for x in seen)):
+                years = {str(y - 1)}
+            inferred.add(next(iter(years)))
         seen.update(years)
     return out
 
