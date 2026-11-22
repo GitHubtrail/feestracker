@@ -327,7 +327,7 @@ TAX_YEAR = re.compile(
     r"|(20\d\d)\s*(?:tax|return|1040|1120|1065|federal|fed\b|state)", re.I)
 
 
-# In a service line a year on its own is the tax year too ("FBAR - Ashish - 2025"),
+# In a service line a year on its own is the tax year too ("FBAR - Dana - 2025"),
 # as long as it isn't part of a date like 4/15/2025.
 YEAR_IN_TITLE = re.compile(r"(?<![\d/])(?<!\d[-.])(20[1-3]\d)(?!\d)(?![/.-]\d)")
 
@@ -395,6 +395,7 @@ def not_billed(conn: sqlite3.Connection, year: str) -> dict:
     removed = set(db.removed_clients(conn))
     confirmed = db.name_matches(conn)
     rejected = db.not_matches(conn)
+    aliases = db.list_aliases(conn)
     with_company = db.billed_with(conn)
     not_filed = set(db.not_filed(conn, year))
     free = set(db.free_clients(conn))
@@ -402,6 +403,11 @@ def not_billed(conn: sqlite3.Connection, year: str) -> dict:
     rows, off = [], []
     for name in names:
         m = taxdome.best(name, rejected.get(name, frozenset()))
+        if not m.same and name in aliases:
+            # Try the return name, often spelled like TaxDome ("Moreno, Raul").
+            by_alias = taxdome.best(aliases[name], rejected.get(name, frozenset()))
+            if by_alias.same or (by_alias.maybe and not m.maybe):
+                m = by_alias
         client = m.found if m.same else None
         if confirmed.get(name) in years:
             client = confirmed[name]

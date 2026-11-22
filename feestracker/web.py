@@ -21,7 +21,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__, db, reports, storage
-from .clientlists import ListError, looks_like_client_list, names_from_text, read_names
+from .clientlists import ListError, looks_like_client_list, names_from_text, read_aliases, read_names
 from .taxdome import ImportError_, format_cents, read_invoices
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -1307,7 +1307,13 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                 # A client list sent to Import by mistake: offer to save it as one instead.
                 # Nothing is saved until the tax year is chosen, and bills are never touched.
                 try:
-                    self._send(client_list_found(filename, read_names(data, filename), today_fn()))
+                    names = read_names(data, filename)
+                    conn = db.connect(db_path)
+                    try:
+                        db.save_aliases(conn, read_aliases(data, filename))  # names only, harmless
+                    finally:
+                        conn.close()
+                    self._send(client_list_found(filename, names, today_fn()))
                     return
                 except ListError:
                     pass
@@ -1469,6 +1475,7 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                 try:
                     if data:
                         names, source = read_names(data, filename), filename
+                        db.save_aliases(conn, read_aliases(data, filename))
                     elif pasted.strip():
                         source = form.get("source", ("", b""))[1].decode("utf-8", "replace").strip()
                         names, source = names_from_text(pasted), source or "pasted names"
@@ -1478,7 +1485,7 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                 except ListError as exc:
                     return reply(escape(str(exc)), False, status=HTTPStatus.BAD_REQUEST)
                 db.save_client_list(conn, year, names, source)
-                reply(f"Saved your {escape(year)} list with {count(len(names), 'client')}.", True, year)
+                reply(f"Saved your ATX {escape(year)} list with {count(len(names), 'client')}.", True, year)
             finally:
                 conn.close()
 

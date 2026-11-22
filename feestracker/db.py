@@ -123,6 +123,13 @@ CREATE TABLE IF NOT EXISTS free_clients (
     marked_at TEXT NOT NULL
 );
 
+-- The return name your tax software shows for a client on a client list, when it
+-- differs from the name kept: TaxDome is often spelled like it.
+CREATE TABLE IF NOT EXISTS list_aliases (
+    name  TEXT PRIMARY KEY,
+    alias TEXT NOT NULL
+);
+
 -- Single invoices you removed, usually ones deleted in TaxDome (an import only adds
 -- and updates, so it can't tell). Left out of every page and total until put back.
 CREATE TABLE IF NOT EXISTS removed_invoices (
@@ -313,6 +320,15 @@ def save_client_list(conn: sqlite3.Connection, year: str, names: list[str], sour
             "INSERT INTO client_list_names (year, position, name) VALUES (?, ?, ?)",
             [(year, i, n) for i, n in enumerate(names)],
         )
+
+
+def save_aliases(conn: sqlite3.Connection, aliases: dict[str, str]) -> None:
+    with conn:
+        conn.executemany("INSERT OR REPLACE INTO list_aliases (name, alias) VALUES (?, ?)", aliases.items())
+
+
+def list_aliases(conn: sqlite3.Connection) -> dict[str, str]:
+    return {r[0]: r[1] for r in conn.execute("SELECT name, alias FROM list_aliases")}
 
 
 def client_lists(conn: sqlite3.Connection) -> list[dict]:
