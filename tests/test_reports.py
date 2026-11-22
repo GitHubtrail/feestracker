@@ -178,3 +178,23 @@ def test_not_billed_for_a_tax_year(conn):
     assert by_name["Acme Bakery LLC"]["kind"] == "in_taxdome"
     assert by_name["Maria Rivera"]["kind"] == "in_taxdome"
     assert by_name["Nobody Here"]["kind"] == "never"
+
+
+def test_obvious_name_variants_match():
+    from feestracker.clientlists import Matcher
+    m = Matcher(["FareFund LLC", "HyLine Dental Associates, PC", "Chauhan Rohanbhai", "Ali Khan DDS PC",
+                 "Patel, Hetal and Bhavini"])
+    assert m.best("Fare Fund Llc").found == "FareFund LLC" and m.best("Fare Fund Llc").same
+    assert m.best("Hy Line Dental Associates Pc").same
+    assert m.best("Rohan Chauhan").found == "Chauhan Rohanbhai" and m.best("Rohan Chauhan").same
+    assert m.best("Ali Khan").found == "Ali Khan DDS PC" and m.best("Ali Khan").same
+    assert m.best("Hetalkumar Patel and Bhavini Patel").same
+    assert not m.best("Kumar Patel").same
+
+
+def test_confirmed_name_counts_as_that_client(conn):
+    db.save_client_list(conn, "2024", ["Acme Bakery Kitchen"])
+    assert reports.not_billed(conn, "2024")["rows"][0]["kind"] == "maybe"
+    db.confirm_match(conn, "Acme Bakery Kitchen", "Acme Bakery, LLC")
+    row = reports.not_billed(conn, "2024")["rows"][0]
+    assert row["kind"] == "in_taxdome" and row["client"] == "Acme Bakery, LLC"

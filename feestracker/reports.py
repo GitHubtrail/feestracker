@@ -359,10 +359,13 @@ def not_billed(conn: sqlite3.Connection, year: str) -> dict:
         "SELECT client, MAX(invoice_date) AS last FROM invoice_view GROUP BY client")}
     taxdome = Matcher(list(years))
     removed = set(db.removed_clients(conn))
+    confirmed = db.name_matches(conn)
     rows = []
     for name in names:
         m = taxdome.best(name)
         client = m.found if m.same else None
+        if confirmed.get(name) in years:
+            client = confirmed[name]
         if name in removed or client in removed:
             continue
         billed = sorted(years.get(client, set())) if client else []

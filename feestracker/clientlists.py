@@ -26,7 +26,12 @@ MAYBE = 0.72
 IGNORED_WORDS = {
     "and", "the", "of", "llc", "inc", "incorporated", "corp", "corporation", "co",
     "company", "ltd", "limited", "pllc", "pc", "pa", "lp", "llp", "plc", "dba",
+    # Professional titles after a name, like "Ali Khan DDS PC".
+    "dds", "dmd", "md", "cpa", "dvm", "esq",
 }
+
+# Name endings added to a first name, like "Rohanbhai" or "Hetalkumar".
+HONORIFIC = re.compile(r"(?<=[a-z]{3})(bhai|ben|kumar)$")
 
 NAME_HEADERS = (
     "client account name", "account name", "client name", "client", "full name",
@@ -260,12 +265,21 @@ def words(name: str) -> tuple[str, ...]:
     text = re.sub(r"\(.*?\)", " ", text)  # nicknames like "(Siva)"
     tokens = re.findall(r"[a-z0-9]+", text.replace(".", ""))
     # Drop company endings, "and", and initials such as the "K" in "Konduru, Sasi K."
-    kept = [t for t in tokens if t not in IGNORED_WORDS and (len(t) > 1 or t.isdigit())]
+    kept = [HONORIFIC.sub("", t) for t in tokens if t not in IGNORED_WORDS and (len(t) > 1 or t.isdigit())]
     return tuple(sorted(set(kept or tokens)))
 
 
+def squashed(name: str) -> str:
+    """A name's letters with spaces and endings removed, so "Fare Fund Llc" and
+    "FareFund LLC", or "Hy Line Dental Associates Pc" and "HyLine Dental Associates, PC",
+    come out the same."""
+    text = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
+    text = re.sub(r"\(.*?\)", " ", text.replace("&", " and ").replace("l.l.c", "llc").replace(".", ""))
+    return "".join(t for t in re.findall(r"[a-z0-9]+", text) if t not in IGNORED_WORDS)
+
+
 def is_company(name: str) -> bool:
-    lowered = " " + re.sub(r"[^a-z0-9]+", " ", name.lower().replace("l.l.c", "llc")) + " "
+    lowered = " " + re.sub(r"[^a-z0-9]+", " ", name.lower().replace(".", "")) + " "
     return any(f" {w} " in lowered for w in IGNORED_WORDS - {"and", "the", "of"})
 
 
@@ -343,11 +357,17 @@ class Matcher:
             for t in w:
                 self.by_word.setdefault(t, set()).add(i)
         self.all_words = list(self.by_word)
+        self.squashed: dict[str, int] = {}
+        for i, n in enumerate(self.names):
+            self.squashed.setdefault(squashed(n), i)
 
     def best(self, name: str) -> Match:
         w = words(name)
         if w in self.exact:
             return Match(name, self.names[self.exact[w]], 1.0)
+        sq = squashed(name)
+        if len(sq) >= 6 and sq in self.squashed:
+            return Match(name, self.names[self.squashed[sq]], 1.0)
         candidates: set[int] = set()
         for t in w:
             candidates |= self.by_word.get(t, set())

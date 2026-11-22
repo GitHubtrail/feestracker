@@ -325,7 +325,7 @@ def tick(name: str) -> str:
 
 
 TICK_ALL = ("<th class=tick><input type=checkbox title='Tick all' "
-            "onclick=\"for (const b of this.closest('table').querySelectorAll('tbody input[type=checkbox]'))"
+            "onclick=\"for (const b of this.closest('table').querySelectorAll(':scope > tbody > tr > td > input[type=checkbox]'))"
             " b.checked = this.checked\"></th>")
 
 
@@ -700,16 +700,28 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
     if year:
         nb = reports.not_billed(conn, year)
         counts = {k: sum(1 for r in nb["rows"] if r["kind"] == k) for k in KIND_NOTE}
-        rows = "".join(
-            f"<tr>{tick(r['client'] or r['name'])}<td>{client_link(r['client']) if r['client'] else escape(r['name'])}"
-            + (f"<div class='small muted'>On your list as {escape(r['name'])}</div>"
-               if r["client"] and r["client"].lower() != r["name"].lower() else "")
-            + f"</td><td class=small>{KIND_NOTE[r['kind']]}"
-            + (f": maybe {client_link(r['maybe'])}" if r["maybe"] else "")
-            + f"</td><td class=muted>{escape(', '.join(r['tax_years'])) or '–'}</td>"
-            f"<td class=muted>{escape(r['last_invoice']) or '–'}</td>"
-            f"<td class='n {'owe' if r['owed'] else 'muted'}'>{money(r['owed'])}</td></tr>"
-            for r in nb["rows"])
+        def row(r: dict) -> str:
+            same = ""
+            if r["maybe"]:
+                same = (f" <button class=small formaction='/not-billed/match' name=match "
+                        f"value=\"{escape(r['name'] + chr(9) + r['maybe'])}\">Same client</button>")
+            return (
+                f"<tr>{tick(r['client'] or r['name'])}<td>{client_link(r['client']) if r['client'] else escape(r['name'])}"
+                + (f"<div class='small muted'>On your list as {escape(r['name'])}</div>"
+                   if r["client"] and r["client"].lower() != r["name"].lower() else "")
+                + f"</td><td class=small>{KIND_NOTE[r['kind']]}"
+                + (f": maybe {client_link(r['maybe'])}{same}" if r["maybe"] else "")
+                + f"</td><td class=muted>{escape(', '.join(r['tax_years'])) or '–'}</td>"
+                f"<td class=muted>{escape(r['last_invoice']) or '–'}</td>"
+                f"<td class='n {'owe' if r['owed'] else 'muted'}'>{money(r['owed'])}</td></tr>")
+
+        rows = "".join(row(r) for r in nb["rows"] if r["kind"] != "never")
+        never = [r for r in nb["rows"] if r["kind"] == "never"]
+        if never:
+            rows += (f"<tr><td colspan=6><details><summary><b>{count(len(never), 'client')} with no invoices in "
+                     "TaxDome at all</b> <span class='small muted'>(maybe never billed in TaxDome, or billed "
+                     "another way). Click to show.</span></summary><table><tbody>"
+                     + "".join(row(r) for r in never) + "</tbody></table></details></td></tr>")
         table = f"""
     <div class=cards>
       <div class=card><div class=label>Not billed for {escape(year)}</div>
@@ -956,6 +968,9 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
             if path == "/not-billed":
                 self._save_list()
                 return
+            if path == "/not-billed/match":
+                self._confirm_match()
+                return
             if path in ("/clients/remove", "/clients/restore"):
                 self._remove_clients(path)
                 return
@@ -1019,6 +1034,21 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
             back = form.get("back", "/")
             if not back.startswith("/") or back.startswith("//"):
                 back = "/"
+            self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
+
+        def _confirm_match(self):
+            length = min(int(self.headers.get("Content-Length") or 0), 1_000_000)
+            fields = parse_qs(self.rfile.read(length).decode("utf-8"))
+            name, _, client = (fields.get("match") or [""])[0].partition("\t")
+            back = (fields.get("back") or ["/not-billed"])[0]
+            if not back.startswith("/") or back.startswith("//"):
+                back = "/not-billed"
+            if name and client:
+                conn = db.connect(db_path)
+                try:
+                    db.confirm_match(conn, name, client)
+                finally:
+                    conn.close()
             self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
 
         def _remove_clients(self, path: str):
