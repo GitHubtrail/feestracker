@@ -194,6 +194,19 @@ def test_obvious_name_variants_match():
     assert not m.best("Kumar Patel").same
 
 
+def test_middle_name_in_taxdome_still_matches():
+    from feestracker.clientlists import Matcher
+    m = Matcher(["Ruiz, Pedro Antonio", "Vega Tomas Ignacio", "Soto ,Marco Luis", "Lara Hugo and Elena"])
+    assert m.best("Pedro Ruiz").found == "Ruiz, Pedro Antonio" and m.best("Pedro Ruiz").same
+    assert m.best("Pedro Ruiz and Carmen Ruiz").found == "Ruiz, Pedro Antonio"
+    assert m.best("Pedro Ruiz and Carmen Ruiz").same
+    assert m.best("Tomas Vega").same
+    # The extra word is in the wrong place for a middle name, so it's a different person.
+    assert not m.best("Luis Soto").same
+    # A couple with a different spouse is not the same return.
+    assert not m.best("Hugo Lara and Rosa Lara").same
+
+
 def test_confirmed_name_counts_as_that_client(conn):
     db.save_client_list(conn, "2024", ["Acme Bakery Kitchen"])
     assert reports.not_billed(conn, "2024")["rows"][0]["kind"] == "maybe"

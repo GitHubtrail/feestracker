@@ -338,6 +338,33 @@ def _word_score(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
+def ordered_words(name: str) -> tuple[str, ...]:
+    """A person's name words in reading order, "First Middle Last". A name written
+    "Last, First Middle" is turned round."""
+    if "," in name:
+        last, rest = name.split(",", 1)
+        name = rest + " " + last
+    text = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
+    text = re.sub(r"\(.*?\)", " ", text.replace(".", ""))
+    kept = [t for t in re.findall(r"[a-z0-9]+", text) if t not in IGNORED_WORDS and len(t) > 1]
+    return tuple(dict.fromkeys(kept))
+
+
+def middle_name_added(a: str, b: str) -> bool:
+    """True when one person's name is the other's two words plus a middle name:
+    "Pedro Ruiz" and "Ruiz, Pedro Antonio", "Pedro Antonio Ruiz" or
+    "Ruiz Pedro Antonio". The extra word must sit where a middle name goes, so
+    "Luis Soto" is not "Soto, Marco Luis"."""
+    x, y = ordered_words(a), ordered_words(b)
+    (short, s_raw), (long_, l_raw) = sorted([(x, a), (y, b)], key=lambda t: len(t[0]))
+    if len(short) != 2 or len(long_) != 3:
+        return False
+    if (long_[0], long_[2]) == short:
+        return True  # First Middle Last
+    # "Last First Middle" written without a comma
+    return "," not in l_raw and set(long_[:2]) == set(short) and "," not in s_raw
+
+
 def score(a: tuple[str, ...], b: tuple[str, ...], spouse_added: bool = False) -> float:
     """How alike two cleaned names are, from 0 to 1.
 
@@ -449,8 +476,17 @@ class Matcher:
             else:
                 spouse_added = self.couples[i] and not company
             s = score(w, c, spouse_added)
+            if s < SAME and not company and not self.companies[i] and middle_name_added(name, self.names[i]):
+                s = 0.91
             if s > best_s or (s == best_s and best_i is not None and self.names[i] < self.names[best_i]):
                 best_i, best_s = i, s
+        if best_s < SAME and couple and " and " in name.lower():
+            # A couple whose return TaxDome has under the filer alone, with a middle name:
+            # "Pedro Ruiz and Carmen Ruiz" for "Ruiz, Pedro Antonio".
+            filer = re.split(r"\s+and\s+", name, maxsplit=1, flags=re.I)[0]
+            m = self.best(filer, reject)
+            if m.same and len(words(filer)) >= 2 and not self.couples[self.names.index(m.found)]:
+                return Match(name, m.found, m.score - 0.005)
         if best_i is None or best_s < MAYBE:
             return Match(name, self.names[best_i] if best_i is not None else None, best_s)
         return Match(name, self.names[best_i], best_s)
