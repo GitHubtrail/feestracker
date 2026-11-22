@@ -329,7 +329,7 @@ TICK_ALL = ("<th class=tick><input type=checkbox title='Tick all' "
             " b.checked = this.checked\"></th>")
 
 
-def remove_form(table: str, back: str, year: str = "") -> str:
+def remove_form(table: str, back: str, year: str = "", inactive_controls: list[str] | None = None) -> str:
     """A table of clients with tick boxes and one button to remove the ticked ones
     (and, on a tax year's Not billed list, one to say you didn't file them that year)."""
     skip = ""
@@ -341,6 +341,13 @@ def remove_form(table: str, back: str, year: str = "") -> str:
     <p><button formaction="/clients/inactive" name=from_year value="{escape(year)}">No longer my client
       from {escape(year)}</button> <span class="small muted">Marks them inactive from {escape(year)} on, so
       they leave this and later years' lists. Their invoices, payments and bad debts stay as they are.</span></p>"""
+    if inactive_controls:
+        options = "".join(f"<option{' selected' if i == 1 else ''}>{y}</option>"
+                          for i, y in enumerate(inactive_controls))
+        skip += f"""<p><span class="small">No longer your client? Tax year</span> <select name=from_year>{options}</select>
+      <button formaction="/clients/inactive">Inactive from this tax year</button>
+      <button formaction="/clients/inactive" name=active value=1>Make active again</button>
+      <span class="small muted">For the ticked clients. Their invoices and bad debts stay as they are.</span></p>"""
     return f"""<form method=post action="/clients/remove">
     <input type=hidden name=back value="{escape(back)}">
     {table}
@@ -350,7 +357,8 @@ def remove_form(table: str, back: str, year: str = "") -> str:
     </form>"""
 
 
-def all_clients(conn: sqlite3.Connection, q: str, message: str = "") -> bytes:
+def all_clients(conn: sqlite3.Connection, q: str, message: str = "", today: date | None = None) -> bytes:
+    today = today or date.today()
     inactive = db.inactive_clients(conn)
     rows = "".join(
         f"<tr>{tick(c['client'])}<td>{client_link(c['client'])}"
@@ -378,7 +386,7 @@ def all_clients(conn: sqlite3.Connection, q: str, message: str = "") -> bytes:
     <form class=inline method=get action="/clients">
       <input type=search name=q value="{escape(q)}" placeholder="Search by name" autofocus>
       <button>Search</button></form>
-    {remove_form(table, back)}
+    {remove_form(table, back, inactive_controls=tax_year_options(today))}
     {removed_html}"""
     return page("All clients", body, "/clients")
 
@@ -976,7 +984,7 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                 elif url.path == "/paid":
                     self._send(paid(conn, year))
                 elif url.path == "/clients":
-                    self._send(all_clients(conn, q.get("q", "")))
+                    self._send(all_clients(conn, q.get("q", ""), today=today))
                 elif url.path == "/client":
                     self._send(client_page(conn, today, q.get("name", "")))
                 elif url.path == "/import":
@@ -1093,7 +1101,7 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
         def _inactive(self):
             length = min(int(self.headers.get("Content-Length") or 0), 1_000_000)
             fields = parse_qs(self.rfile.read(length).decode("utf-8"), keep_blank_values=True)
-            year = (fields.get("from_year") or [""])[0]
+            year = "" if fields.get("active") else (fields.get("from_year") or [""])[0]
             back = (fields.get("back") or ["/clients"])[0]
             if not back.startswith("/") or back.startswith("//"):
                 back = "/clients"

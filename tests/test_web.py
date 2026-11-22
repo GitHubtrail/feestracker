@@ -413,3 +413,14 @@ def test_inactive_from_a_year(server, tmp_path):
     assert "Inactive from this tax year" in get(server + back)
     assert post_multi(server, "/clients/inactive", [("name", "Rivera Maria"), ("from_year", "1999")]) == 400
     conn.close()
+
+
+def test_inactive_from_all_clients(server):
+    upload(server, FIXTURE.read_bytes())
+    html = get(server + "/clients")
+    assert "Inactive from this tax year" in html and "<option selected>2025</option>" in html
+    post_multi(server, "/clients/inactive", [("name", "Rivera Maria"), ("name", "Chen & Sons Inc"),
+                                             ("from_year", "2025"), ("back", "/clients")])
+    assert get(server + "/clients").count("inactive from 2025") == 2
+    post_multi(server, "/clients/inactive", [("name", "Rivera Maria"), ("from_year", "2025"), ("active", "1")])
+    assert get(server + "/clients").count("inactive from 2025") == 1
