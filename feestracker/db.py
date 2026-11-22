@@ -123,6 +123,13 @@ CREATE TABLE IF NOT EXISTS free_clients (
     marked_at TEXT NOT NULL
 );
 
+-- Single invoices you removed, usually ones deleted in TaxDome (an import only adds
+-- and updates, so it can't tell). Left out of every page and total until put back.
+CREATE TABLE IF NOT EXISTS removed_invoices (
+    number     TEXT PRIMARY KEY,
+    removed_at TEXT NOT NULL
+);
+
 -- Clients you removed. Their invoices are left out of every page and total, and
 -- stay left out after a new TaxDome import, until you put them back.
 CREATE TABLE IF NOT EXISTS removed_clients (
@@ -153,7 +160,8 @@ WITH m AS (SELECT invoice_number, SUM(amount_cents) AS cents, MAX(paid_on) AS la
        FROM invoices i
        LEFT JOIN m ON m.invoice_number = i.number
        LEFT JOIN bad_debts b ON b.invoice_number = i.number
-       WHERE i.client NOT IN (SELECT name FROM removed_clients))
+       WHERE i.client NOT IN (SELECT name FROM removed_clients)
+         AND i.number NOT IN (SELECT number FROM removed_invoices))
 SELECT v.*,
        -- What was paid toward the invoice itself, so billed always equals
        -- collected + owed + written off. Anything paid above the invoice amount
@@ -340,6 +348,39 @@ def restore_clients(conn: sqlite3.Connection, names: Iterable[str]) -> int:
     with conn:
         return conn.executemany("DELETE FROM removed_clients WHERE name = ?",
                                 [(n,) for n in set(names)]).rowcount
+
+
+def remove_invoices(conn: sqlite3.Connection, numbers: Iterable[str]) -> int:
+    """Take invoices out of every page and total. Bills outside TaxDome are deleted instead."""
+    now = datetime.now().isoformat(timespec="seconds")
+    numbers = set(numbers)
+    for n in [n for n in numbers if is_outside(n)]:
+        delete_outside_bill(conn, n)
+    with conn:
+        return conn.executemany("INSERT OR IGNORE INTO removed_invoices (number, removed_at) VALUES (?, ?)",
+                                [(n, now) for n in numbers if n and not is_outside(n)]).rowcount
+
+
+def restore_invoices(conn: sqlite3.Connection, numbers: Iterable[str]) -> None:
+    with conn:
+        conn.executemany("DELETE FROM removed_invoices WHERE number = ?", [(n,) for n in set(numbers)])
+
+
+def removed_invoices(conn: sqlite3.Connection, client: str | None = None) -> list[dict]:
+    sql = """SELECT i.number, i.client, i.invoice_date, i.total_cents, r.removed_at
+             FROM removed_invoices r JOIN invoices i ON i.number = r.number"""
+    params: tuple = ()
+    if client is not None:
+        sql += " WHERE i.client = ?"
+        params = (client,)
+    return [dict(r) for r in conn.execute(sql + " ORDER BY i.invoice_date DESC", params)]
+
+
+def missing_from_import(conn: sqlite3.Connection, numbers: set[str]) -> list[dict]:
+    """TaxDome invoices here that a full export didn't have: most likely deleted in TaxDome."""
+    return [dict(r) for r in conn.execute(
+        """SELECT number, client, invoice_date, total_cents FROM invoice_view
+           WHERE number NOT LIKE 'OUT-%' ORDER BY invoice_date DESC""") if r["number"] not in numbers]
 
 
 def removed_clients(conn: sqlite3.Connection) -> list[str]:

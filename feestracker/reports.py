@@ -367,6 +367,7 @@ def client_tax_years(conn: sqlite3.Connection) -> dict[str, set[str]]:
         titles.setdefault(r["invoice_number"], []).append(r["title"])
     out: dict[str, set[str]] = {}
     for r in conn.execute("SELECT number, client, invoice_date, description FROM invoices "
+                          "WHERE number NOT IN (SELECT number FROM removed_invoices) "
                           "ORDER BY client, invoice_date, number"):
         seen = out.setdefault(r["client"], set())
         years = tax_years_of(r["description"] or "", r["invoice_date"], titles.get(r["number"], []))

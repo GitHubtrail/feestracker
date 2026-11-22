@@ -149,7 +149,7 @@ def bring_back_adjustments(conn: sqlite3.Connection, old: Path) -> dict[str, int
                                 WHERE number LIKE 'OUT-%'""")
                 conn.execute("""INSERT OR IGNORE INTO line_items SELECT * FROM old.line_items
                                 WHERE invoice_number LIKE 'OUT-%'""")
-            for table in ("billed_with", "free_clients", "name_matches", "not_matches", "not_filed", "inactive_clients"):
+            for table in ("billed_with", "free_clients", "removed_invoices", "name_matches", "not_matches", "not_filed", "inactive_clients"):
                 if table in tables:
                     conn.execute(f"INSERT OR IGNORE INTO {table} SELECT * FROM old.{table}")
             if "bad_debts" in tables:
