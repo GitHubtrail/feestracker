@@ -376,3 +376,17 @@ def test_same_client_button_and_folded_never_list(server, tmp_path):
     assert status == 303
     html = get(server + "/not-billed?year=2024")
     assert "Same client" not in html and "On your list as Acme Bakery Kitchen" in html
+
+
+def test_didnt_file_for_a_year(server, tmp_path):
+    upload(server, FIXTURE.read_bytes())
+    post_list(server, "2024", "c.csv", b"Name\nNobody Here\nSam Other\n")
+    post_list(server, "2023", "c.csv", b"Name\nNobody Here\n")
+    status = post_multi(server, "/not-billed/not-filed", [("year", "2024"), ("name", "Nobody Here")])
+    assert status == 303
+    html = get(server + "/not-billed?year=2024")
+    assert "Didn't file for 2024 (1)" in html
+    assert html.split("Didn't file for 2024 (1)")[0].count("Nobody Here") == 0
+    assert "Nobody Here" in get(server + "/not-billed?year=2023")  # other years unchanged
+    post_multi(server, "/not-billed/not-filed", [("year", "2024"), ("filed", "1"), ("name", "Nobody Here")])
+    assert "Didn't file for 2024 (" not in get(server + "/not-billed?year=2024")

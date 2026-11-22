@@ -329,11 +329,19 @@ TICK_ALL = ("<th class=tick><input type=checkbox title='Tick all' "
             " b.checked = this.checked\"></th>")
 
 
-def remove_form(table: str, back: str) -> str:
-    """A table of clients with tick boxes and one button to remove the ticked ones."""
+def remove_form(table: str, back: str, year: str = "") -> str:
+    """A table of clients with tick boxes and one button to remove the ticked ones
+    (and, on a tax year's Not billed list, one to say you didn't file them that year)."""
+    skip = ""
+    if year:
+        skip = f"""<input type=hidden name=year value="{escape(year)}">
+    <p><button formaction="/not-billed/not-filed">Didn't file for {escape(year)}</button>
+      <span class="small muted">Takes the ticked clients off the {escape(year)} list only. Nothing else
+      changes.</span></p>"""
     return f"""<form method=post action="/clients/remove">
     <input type=hidden name=back value="{escape(back)}">
     {table}
+    {skip}
     <p><button>Remove ticked clients</button> <span class="small muted">They are hidden from every
       page and total, and stay hidden after a new import. You can put them back on All clients.</span></p>
     </form>"""
@@ -741,7 +749,8 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
     {remove_form(f"""<div class=wrap><table><thead><tr>{TICK_ALL}<th>Client</th><th>Why it's here</th>
       <th>Tax years billed</th><th>Last invoice</th><th class=n>Owes now</th></tr></thead>
       <tbody>{rows or '<tr><td colspan=6 class=muted>Everyone on this list was billed.</td></tr>'}</tbody>
-    </table></div>""", "/not-billed?year=" + quote(year))}"""
+    </table></div>""", "/not-billed?year=" + quote(year), year)}
+    {not_filed_html(conn, year)}"""
     options = "".join(f"<option{' selected' if y == str(today.year - 1) else ''}>{y}</option>"
                       for y in tax_year_options(today))
     upload = f"""<h2>Add or replace a client list</h2>
@@ -762,6 +771,19 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
     {table}
     {upload}"""
     return page("Not billed", body, "/not-billed")
+
+
+def not_filed_html(conn: sqlite3.Connection, year: str) -> str:
+    names = db.not_filed(conn, year)
+    if not names:
+        return ""
+    items = "".join(f"<tr>{tick(n)}<td>{escape(n)}</td></tr>" for n in names)
+    return f"""<h2>Didn't file for {escape(year)} ({len(names)})</h2>
+    <form method=post action="/not-billed/not-filed">
+    <input type=hidden name=year value="{escape(year)}"><input type=hidden name=filed value=1>
+    <input type=hidden name=back value="/not-billed?year={quote(year)}">
+    <div class=wrap><table><thead><tr>{TICK_ALL}<th>Client</th></tr></thead><tbody>{items}</tbody></table></div>
+    <p><button>Put ticked clients back on the list</button></p></form>"""
 
 
 def not_billed_csv(conn: sqlite3.Connection, year: str) -> bytes:
@@ -968,6 +990,9 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
             if path == "/not-billed":
                 self._save_list()
                 return
+            if path == "/not-billed/not-filed":
+                self._not_filed()
+                return
             if path == "/not-billed/match":
                 self._confirm_match()
                 return
@@ -1034,6 +1059,19 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
             back = form.get("back", "/")
             if not back.startswith("/") or back.startswith("//"):
                 back = "/"
+            self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
+
+        def _not_filed(self):
+            length = min(int(self.headers.get("Content-Length") or 0), 1_000_000)
+            fields = parse_qs(self.rfile.read(length).decode("utf-8"))
+            year = (fields.get("year") or [""])[0]
+            back = "/not-billed?year=" + quote(year)
+            if year and fields.get("name"):
+                conn = db.connect(db_path)
+                try:
+                    db.mark_not_filed(conn, year, fields["name"], filed=bool(fields.get("filed")))
+                finally:
+                    conn.close()
             self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
 
         def _confirm_match(self):
