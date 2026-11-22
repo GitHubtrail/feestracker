@@ -337,26 +337,44 @@ DATE = re.compile(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z
                   re.I)
 
 
-def tax_years_of(text: str, invoice_date: str, titles: Iterable[str] = ()) -> set[str]:
+def named_tax_years(text: str, titles: Iterable[str] = ()) -> set[str]:
+    """Tax years written on an invoice, in its description or service lines."""
     named = {a or b for a, b in TAX_YEAR.findall(text)}
     for title in titles:
         title = DATE.sub(" ", title)
         named.update(a or b for a, b in TAX_YEAR.findall(title))
         named.update(YEAR_IN_TITLE.findall(title))
+    return named
+
+
+def tax_years_of(text: str, invoice_date: str, titles: Iterable[str] = ()) -> set[str]:
+    named = named_tax_years(text, titles)
     if named:
         return named
     return {str(int(invoice_date[:4]) - 1)} if invoice_date[:4].isdigit() else set()
 
 
 def client_tax_years(conn: sqlite3.Connection) -> dict[str, set[str]]:
-    """Per TaxDome client, the tax years they have been invoiced for."""
+    """Per client, the tax years they have been invoiced for.
+
+    An invoice copied from last year often keeps last year's text ("Tax Year 2023"
+    on invoices dated 2024, 2025 and 2026). So when an invoice only repeats tax
+    years an earlier invoice of the same client already had, and it is dated more
+    than a year after them, it counts for the year before its date instead.
+    """
     titles: dict[str, list[str]] = {}
     for r in conn.execute("SELECT invoice_number, title FROM line_items WHERE kind = 'service'"):
         titles.setdefault(r["invoice_number"], []).append(r["title"])
     out: dict[str, set[str]] = {}
-    for r in conn.execute("SELECT number, client, invoice_date, description FROM invoices"):
-        out.setdefault(r["client"], set()).update(
-            tax_years_of(r["description"] or "", r["invoice_date"], titles.get(r["number"], [])))
+    for r in conn.execute("SELECT number, client, invoice_date, description FROM invoices "
+                          "ORDER BY client, invoice_date, number"):
+        seen = out.setdefault(r["client"], set())
+        years = tax_years_of(r["description"] or "", r["invoice_date"], titles.get(r["number"], []))
+        billed_in = r["invoice_date"][:4]
+        if (billed_in.isdigit() and years and years <= seen
+                and all(int(y) < int(billed_in) - 1 for y in years)):
+            years = {str(int(billed_in) - 1)}
+        seen.update(years)
     return out
 
 

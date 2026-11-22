@@ -208,3 +208,16 @@ def test_year_written_alone_in_a_service_line():
     assert tax_years_of("", "2026-01-26", ["Tax Return Preparation -2024"]) == {"2024"}
     assert tax_years_of("", "2024-01-15", ["Due January 16 2024"]) == {"2023"}  # a date, not a tax year
     assert tax_years_of("", "2025-05-01", ["Paid 4/15/2025"]) == {"2024"}
+
+
+def test_copied_invoice_with_old_tax_year(conn):
+    """Invoices copied each year keep "Tax Year 2023"; later copies count for the year before their date."""
+    from feestracker import reports
+    rows = [("1", "2024-04-11", "Tax Year 2023"), ("2", "2025-04-05", "Tax Year 2023"),
+            ("3", "2026-04-06", "Tax Year 2023"), ("4", "2026-05-01", "Tax Year 2022")]
+    for number, when, text in rows:
+        conn.execute("INSERT INTO invoices (number, status, client, description, invoice_date, total_cents,"
+                     " paid_cents, balance_cents) VALUES (?, 'paid', 'Copy Client', ?, ?, 100, 100, 0)",
+                     (number, text, when))
+    # Invoice 4 is the first to name 2022, so a late return billed in 2026 still counts for 2022.
+    assert reports.client_tax_years(conn)["Copy Client"] == {"2022", "2023", "2024", "2025"}
