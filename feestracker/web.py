@@ -919,7 +919,7 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
     {off_list_html(nb["off"], year)}"""
     options = "".join(f"<option{' selected' if y == str(today.year - 1) else ''}>{y}</option>"
                       for y in tax_year_options(today))
-    upload = f"""<h2>Add or replace an ATX list</h2>
+    upload = f"""<h2 id=upload>Add or replace an ATX list</h2>
     <form method=post action="/not-billed" enctype="multipart/form-data" class="payform">
       <p><label>Tax year <select name=year>{options}</select></label></p>
       <p><label>Your ATX client list for that tax year (Excel .xlsx or CSV): <input type=file name=file
@@ -932,7 +932,8 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
     </form>"""
     body = f"""<h1>Not billed yet{' for tax year ' + escape(year) if year else ''}</h1>
     {message}
-    <p class=muted>Returns on your ATX list for a tax year that have no TaxDome invoice for that year.</p>
+    <p class=muted>Returns on your ATX list for a tax year that have no TaxDome invoice for that year.
+      <a href="#upload" class=btn style="margin-left:8px">Upload ATX list</a></p>
     {('<p>Tax year: ' + tabs + '</p>') if years else '<div class=note>Add your ATX list for a tax year below to see who wasn’t billed.</div>'}
     {table}
     {upload}"""
