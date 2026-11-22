@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 import re
+from typing import Iterable
 from datetime import date
 
 from . import db
@@ -326,8 +327,22 @@ TAX_YEAR = re.compile(
     r"|(20\d\d)\s*(?:tax|return|1040|1120|1065|federal|fed\b|state)", re.I)
 
 
-def tax_years_of(text: str, invoice_date: str) -> set[str]:
+# In a service line a year on its own is the tax year too ("FBAR - Ashish - 2025"),
+# as long as it isn't part of a date like 4/15/2025.
+YEAR_IN_TITLE = re.compile(r"(?<![\d/])(?<!\d[-.])(20[1-3]\d)(?!\d)(?![/.-]\d)")
+
+
+# A date written out, like "Due January 16 2024": its year is not a tax year.
+DATE = re.compile(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(st|nd|rd|th)?,?\s+20\d\d",
+                  re.I)
+
+
+def tax_years_of(text: str, invoice_date: str, titles: Iterable[str] = ()) -> set[str]:
     named = {a or b for a, b in TAX_YEAR.findall(text)}
+    for title in titles:
+        title = DATE.sub(" ", title)
+        named.update(a or b for a, b in TAX_YEAR.findall(title))
+        named.update(YEAR_IN_TITLE.findall(title))
     if named:
         return named
     return {str(int(invoice_date[:4]) - 1)} if invoice_date[:4].isdigit() else set()
@@ -340,8 +355,8 @@ def client_tax_years(conn: sqlite3.Connection) -> dict[str, set[str]]:
         titles.setdefault(r["invoice_number"], []).append(r["title"])
     out: dict[str, set[str]] = {}
     for r in conn.execute("SELECT number, client, invoice_date, description FROM invoices"):
-        text = (r["description"] or "") + "\n" + "\n".join(titles.get(r["number"], []))
-        out.setdefault(r["client"], set()).update(tax_years_of(text, r["invoice_date"]))
+        out.setdefault(r["client"], set()).update(
+            tax_years_of(r["description"] or "", r["invoice_date"], titles.get(r["number"], [])))
     return out
 
 
