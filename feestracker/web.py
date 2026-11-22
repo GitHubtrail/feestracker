@@ -337,7 +337,10 @@ def remove_form(table: str, back: str, year: str = "") -> str:
         skip = f"""<input type=hidden name=year value="{escape(year)}">
     <p><button formaction="/not-billed/not-filed">Didn't file for {escape(year)}</button>
       <span class="small muted">Takes the ticked clients off the {escape(year)} list only. Nothing else
-      changes.</span></p>"""
+      changes.</span></p>
+    <p><button formaction="/clients/inactive" name=from_year value="{escape(year)}">No longer my client
+      from {escape(year)}</button> <span class="small muted">Marks them inactive from {escape(year)} on, so
+      they leave this and later years' lists. Their invoices, payments and bad debts stay as they are.</span></p>"""
     return f"""<form method=post action="/clients/remove">
     <input type=hidden name=back value="{escape(back)}">
     {table}
@@ -348,8 +351,12 @@ def remove_form(table: str, back: str, year: str = "") -> str:
 
 
 def all_clients(conn: sqlite3.Connection, q: str, message: str = "") -> bytes:
+    inactive = db.inactive_clients(conn)
     rows = "".join(
-        f"<tr>{tick(c['client'])}<td>{client_link(c['client'])}</td><td class=n>{c['invoices']}</td>"
+        f"<tr>{tick(c['client'])}<td>{client_link(c['client'])}"
+        + (f" <span class='pill muted'>inactive from {escape(inactive[c['client']])}</span>"
+           if c["client"] in inactive else "")
+        + f"</td><td class=n>{c['invoices']}</td>"
         f"<td class=n>{money(c['billed'])}</td><td class='n ok'>{money(c['paid'])}</td>"
         f"<td class='n {'owe' if c['owed'] else 'muted'}'>{money(c['owed'])}</td></tr>"
         for c in reports.clients(conn, q)
@@ -446,6 +453,7 @@ def client_page(conn: sqlite3.Connection, today: date, name: str) -> bytes:
           document.getElementById('reminder').value).then(()=>{{this.textContent='Copied'}})">Copy reminder</button></p>"""
     body = f"""<p class=small><a href="/clients">← All clients</a></p>
     <h1>{escape(name)}</h1>
+    {inactive_box(conn, name, today)}
     <div class=cards>
       <div class=card><div class=label>Owes</div><div class="big {'owe' if owed else 'muted'}">{money(owed)}</div>
         <div class="small muted">{len(open_invs)} open invoices</div>
@@ -461,6 +469,24 @@ def client_page(conn: sqlite3.Connection, today: date, name: str) -> bytes:
       <th class=n>Total</th><th class=n>Paid</th><th class=n>Owes</th></tr></thead>
       <tbody>{''.join(rows)}</tbody></table></div>"""
     return page(name, body)
+
+
+def inactive_box(conn: sqlite3.Connection, name: str, today: date) -> str:
+    """Shows whether a client is inactive, with a button to change it."""
+    back = "/client?name=" + quote(name)
+    since = db.inactive_clients(conn).get(name)
+    hidden = (f"<input type=hidden name=name value=\"{escape(name)}\">"
+              f"<input type=hidden name=back value=\"{escape(back)}\">")
+    if since:
+        return (f"<div class=note><b>No longer your client from tax year {escape(since)}.</b> Don't bill them "
+                f"for {escape(since)} or later. Their invoices below stay as they are. "
+                f"<form class=act method=post action='/clients/inactive'>{hidden}"
+                f"<button name=from_year value=''>Make active again</button></form></div>")
+    options = "".join(f"<option{' selected' if y == str(today.year - 1) else ''}>{y}</option>"
+                      for y in tax_year_options(today))
+    return (f"<form class=act method=post action='/clients/inactive'>{hidden}"
+            f"<span class='small muted'>No longer your client? </span>"
+            f"<select name=from_year>{options}</select> <button>Inactive from this tax year</button></form>")
 
 
 def bad_debt_button(number: str, mark: bool, back: str) -> str:
@@ -990,6 +1016,9 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
             if path == "/not-billed":
                 self._save_list()
                 return
+            if path == "/clients/inactive":
+                self._inactive()
+                return
             if path == "/not-billed/not-filed":
                 self._not_filed()
                 return
@@ -1059,6 +1088,24 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
             back = form.get("back", "/")
             if not back.startswith("/") or back.startswith("//"):
                 back = "/"
+            self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
+
+        def _inactive(self):
+            length = min(int(self.headers.get("Content-Length") or 0), 1_000_000)
+            fields = parse_qs(self.rfile.read(length).decode("utf-8"), keep_blank_values=True)
+            year = (fields.get("from_year") or [""])[0]
+            back = (fields.get("back") or ["/clients"])[0]
+            if not back.startswith("/") or back.startswith("//"):
+                back = "/clients"
+            if year and year not in tax_year_options(today_fn()):
+                self._send(page("Not saved", "<h1>Please choose a tax year</h1>"), status=HTTPStatus.BAD_REQUEST)
+                return
+            if fields.get("name"):
+                conn = db.connect(db_path)
+                try:
+                    db.set_inactive(conn, [n for n in fields["name"] if n], year or None)
+                finally:
+                    conn.close()
             self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
 
         def _not_filed(self):
