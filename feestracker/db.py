@@ -75,6 +75,14 @@ CREATE TABLE IF NOT EXISTS manual_payments (
 );
 CREATE INDEX IF NOT EXISTS manual_payments_invoice ON manual_payments(invoice_number);
 
+-- Names on your client lists that you confirmed are a TaxDome client spelled
+-- another way, so the Not billed page treats them as that client.
+CREATE TABLE IF NOT EXISTS name_matches (
+    list_name    TEXT PRIMARY KEY,
+    client       TEXT NOT NULL,
+    confirmed_at TEXT NOT NULL
+);
+
 -- Clients you removed. Their invoices are left out of every page and total, and
 -- stay left out after a new TaxDome import, until you put them back.
 CREATE TABLE IF NOT EXISTS removed_clients (
@@ -296,3 +304,14 @@ def restore_clients(conn: sqlite3.Connection, names: Iterable[str]) -> int:
 
 def removed_clients(conn: sqlite3.Connection) -> list[str]:
     return [r[0] for r in conn.execute("SELECT name FROM removed_clients ORDER BY name COLLATE NOCASE")]
+
+
+def confirm_match(conn: sqlite3.Connection, list_name: str, client: str) -> None:
+    """Remember that a name on a client list is this TaxDome client."""
+    with conn:
+        conn.execute("INSERT OR REPLACE INTO name_matches (list_name, client, confirmed_at) VALUES (?, ?, ?)",
+                     (list_name, client, datetime.now().isoformat(timespec="seconds")))
+
+
+def name_matches(conn: sqlite3.Connection) -> dict[str, str]:
+    return {r[0]: r[1] for r in conn.execute("SELECT list_name, client FROM name_matches")}

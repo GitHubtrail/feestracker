@@ -364,3 +364,15 @@ def test_second_copy_takes_a_free_port_and_shows_its_version(tmp_path):
         for s in (first, second):
             s.shutdown()
             s.server_close()
+
+
+def test_same_client_button_and_folded_never_list(server, tmp_path):
+    upload(server, FIXTURE.read_bytes())
+    post_list(server, "2024", "c.csv", b"Name\nAcme Bakery Kitchen\nNobody Here\n")
+    html = get(server + "/not-billed?year=2024")
+    assert "Same client" in html and "<details>" in html and "1 client with no invoices" in html
+    status = post_multi(server, "/not-billed/match", [
+        ("match", "Acme Bakery Kitchen\tAcme Bakery, LLC"), ("back", "/not-billed?year=2024")])
+    assert status == 303
+    html = get(server + "/not-billed?year=2024")
+    assert "Same client" not in html and "On your list as Acme Bakery Kitchen" in html
