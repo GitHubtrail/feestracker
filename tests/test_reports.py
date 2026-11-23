@@ -194,6 +194,19 @@ def test_obvious_name_variants_match():
     assert not m.best("Kumar Patel").same
 
 
+def test_middle_name_in_taxdome_still_matches():
+    from feestracker.clientlists import Matcher
+    m = Matcher(["Ruiz, Pedro Antonio", "Vega Tomas Ignacio", "Soto ,Marco Luis", "Lara Hugo and Elena"])
+    assert m.best("Pedro Ruiz").found == "Ruiz, Pedro Antonio" and m.best("Pedro Ruiz").same
+    assert m.best("Pedro Ruiz and Carmen Ruiz").found == "Ruiz, Pedro Antonio"
+    assert m.best("Pedro Ruiz and Carmen Ruiz").same
+    assert m.best("Tomas Vega").same
+    # The extra word is in the wrong place for a middle name, so it's a different person.
+    assert not m.best("Luis Soto").same
+    # A couple with a different spouse is not the same return.
+    assert not m.best("Hugo Lara and Rosa Lara").same
+
+
 def test_confirmed_name_counts_as_that_client(conn):
     db.save_client_list(conn, "2024", ["Acme Bakery Kitchen"])
     assert reports.not_billed(conn, "2024")["rows"][0]["kind"] == "maybe"
@@ -223,6 +236,21 @@ def test_copied_invoice_with_old_tax_year(conn):
     assert reports.client_tax_years(conn)["Copy Client"] == {"2022", "2023", "2024", "2025"}
 
 
+def test_two_invoices_in_one_year_after_a_skipped_year(conn):
+    """Billed for 2023, then twice in 2026 with no year written: one is the late 2024 return."""
+    from feestracker import reports
+    for number, when in [("1", "2024-04-15"), ("2", "2026-04-10"), ("3", "2026-10-27")]:
+        conn.execute("INSERT INTO invoices (number, status, client, description, invoice_date, total_cents,"
+                     " paid_cents, balance_cents) VALUES (?, 'paid', 'Late Client', '', ?, 100, 100, 0)",
+                     (number, when))
+        conn.execute("INSERT INTO invoices (number, status, client, description, invoice_date, total_cents,"
+                     " paid_cents, balance_cents) VALUES (?, 'paid', 'New Client', '', ?, 100, 100, 0)",
+                     ("N" + number, when if number != "1" else "2026-01-05"))
+    years = reports.client_tax_years(conn)
+    assert years["Late Client"] == {"2023", "2024", "2025"}
+    assert years["New Client"] == {"2025"}  # no earlier year, so nothing was skipped
+
+
 def test_return_name_used_when_names_differ(conn):
     """ATX keeps "Raul Castillo" as the filer, but the return (and TaxDome) says Moreno."""
     from feestracker import clientlists, reports
@@ -236,3 +264,26 @@ def test_return_name_used_when_names_differ(conn):
     assert [r["name"] for r in reports.not_billed(conn, "2025")["rows"]] == names
     db.save_aliases(conn, clientlists.read_aliases(data, "atx.csv"))
     assert reports.not_billed(conn, "2025")["rows"] == []
+
+
+def _billed(conn, number, client, when, text=""):
+    conn.execute("INSERT INTO invoices (number, status, client, description, invoice_date, total_cents,"
+                 " paid_cents, balance_cents) VALUES (?, 'paid', ?, ?, ?, 100, 100, 0)", (number, client, text, when))
+
+
+def test_suggestions_for_not_billed(conn):
+    from feestracker import reports
+    _billed(conn, "1", "Rivas Tomas and Lucia", "2025-03-01", "Returns for Tomas, Lucia and Nico")
+    _billed(conn, "2", "Ferraz Holdings Inc", "2025-03-02")
+    _billed(conn, "3", "Vidal Ramon and Ines", "2025-03-03")
+    _billed(conn, "4", "Okafor, Ada", "2024-03-03")
+    db.save_client_list(conn, "2023", ["Bruno Ferraz", "Zed Nobody"])
+    db.save_client_list(conn, "2024", ["Nico Rivas", "Bruno Ferraz", "Ram Vidal", "Ada Okafor", "Zed Nobody"])
+    nb = reports.not_billed(conn, "2024")
+    found = reports.suggestions(conn, "2024", nb["rows"])
+    assert found["Nico Rivas"] == {"action": "with", "company": "Rivas Tomas and Lucia", "sure": True,
+                                   "why": "Nico is named on Rivas Tomas and Lucia’s invoice."}
+    assert found["Bruno Ferraz"]["company"] == "Ferraz Holdings Inc" and found["Bruno Ferraz"]["sure"]
+    assert found["Ram Vidal"]["action"] == "same" and found["Ram Vidal"]["client"] == "Vidal Ramon and Ines"
+    assert found["Ada Okafor"]["action"] == "bill"
+    assert found["Zed Nobody"]["action"] == "free" and "2023, 2024" in found["Zed Nobody"]["why"]
