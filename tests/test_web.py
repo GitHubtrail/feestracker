@@ -370,7 +370,7 @@ def test_same_client_button_and_folded_never_list(server, tmp_path):
     upload(server, FIXTURE.read_bytes())
     post_list(server, "2024", "c.csv", b"Name\nAcme Bakery Kitchen\nNobody Here\n")
     html = get(server + "/not-billed?year=2024")
-    assert "Same client" in html and "<details>" in html and "1 return in ATX, never invoiced" in html
+    assert "Same client" in html and "Never invoiced in TaxDome" in html
     status = post_multi(server, "/not-billed/match", [
         ("match", "Acme Bakery Kitchen\tAcme Bakery, LLC"), ("back", "/not-billed?year=2024")])
     assert status == 303
@@ -390,7 +390,7 @@ def test_not_the_same_button_drops_the_guess(server, tmp_path):
         ("match", "Acme Bakery Kitchen\tAcme Bakery, LLC"), ("back", "/not-billed?year=2024")])
     assert status == 303
     html = get(server + "/not-billed?year=2024")
-    assert "Same client" not in html and "1 return in ATX, never invoiced" in html
+    assert "Same client" not in html and "Never invoiced in TaxDome" in html
 
 
 def test_didnt_file_for_a_year(server, tmp_path):
@@ -627,3 +627,26 @@ def test_undo_billed_with_from_review_card(server, tmp_path):
                                                            ("back", "/not-billed/review?year=2024&all=1")]) == 303
     assert db.billed_with(conn) == {}
     assert "Yes, billed with Tarn Holdings Inc" not in get(server + "/not-billed/review?year=2024&all=1")
+
+
+def test_not_billed_rows_have_answer_buttons(server, tmp_path):
+    post_list(server, "2023", "c.csv", b"Name\nZed Nobody\nAmy Other\n")
+    html = get(server + "/not-billed?year=2023")
+    assert "of 2 returns on your ATX" in html and "Not my client for 2023" in html
+    assert "Billed another way" in html and "form=r0" in html
+    card = get(server + "/not-billed/review?year=2023&all=1&name=Zed%20Nobody")
+    assert "2 of 2" in card and "font-weight:650\">Zed Nobody<" in card
+    assert post_multi(server, "/not-billed/not-filed", [("name", "Zed Nobody"), ("year", "2023"),
+                                                        ("back", "/not-billed?year=2023")]) == 303
+    assert "Not my client for 2023" in get(server + "/not-billed?year=2023").split("Taken off the 2023 list")[1]
+
+
+def test_all_clients_summary(server, tmp_path):
+    upload(server, FIXTURE.read_bytes())
+    post_list(server, "2023", "c.csv", b"Name\nZed Nobody\n")
+    post_multi(server, "/not-billed/not-filed", [("name", "Zed Nobody"), ("year", "2023")])
+    html = get(server + "/clients")
+    assert "Active" in html and "Inactive" in html and "Not my client" in html
+    mine = get(server + "/clients?show=notmine")
+    assert "Zed Nobody" in mine and "2023" in mine
+    assert "No clients found" in get(server + "/clients?show=inactive")

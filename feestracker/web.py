@@ -398,7 +398,7 @@ def client_actions(table: str, back: str, today: date, *, year: str = "", money_
     """A table of clients with tick boxes, and one bar of buttons for the ticked clients.
 
     No pop-ups: every action can be undone (on the client's page, the Bad debts page,
-    the Removed clients list or the Didn't file list)."""
+    the Removed clients list or the Taken off list)."""
     years = tax_year_options(today)
     chosen = year if year in years else str(today.year - 1)
     options = "".join(f"<option{' selected' if y == chosen else ''}>{y}</option>" for y in years)
@@ -412,7 +412,7 @@ def client_actions(table: str, back: str, today: date, *, year: str = "", money_
     if year:
         buttons.append(
             f"<button formaction='/not-billed/not-filed' class=secondary "
-            f"title='Takes them off the {escape(year)} list only'>Didn't file for {escape(year)}</button>"
+            f"title='Takes them off the {escape(year)} list only'>Not my client for {escape(year)}</button>"
             f"<button formaction='/not-billed/covered' class=secondary "
             f"title='One invoice covered {escape(year)} and another year'>Billed on another invoice</button>"
             "<button formaction='/clients/free' class=secondary "
@@ -449,9 +449,40 @@ FILTER = ("<input type=search class=filter placeholder='Type a name to find a cl
           "r.hidden=q&&!r.textContent.toLowerCase().includes(q)\">")
 
 
-def all_clients(conn: sqlite3.Connection, q: str, message: str = "", today: date | None = None) -> bytes:
+def all_clients(conn: sqlite3.Connection, q: str, message: str = "", today: date | None = None,
+                show: str = "") -> bytes:
     today = today or date.today()
     inactive = db.inactive_clients(conn)
+    everyone = reports.clients(conn, q)
+    not_mine: dict[str, list[str]] = {}
+    for r in conn.execute("SELECT name, year FROM not_filed ORDER BY year"):
+        not_mine.setdefault(r[0], []).append(r[1])
+    groups = {
+        "": ("All clients", everyone),
+        "active": ("Active", [c for c in everyone if c["client"] not in inactive]),
+        "inactive": ("Inactive", [c for c in everyone if c["client"] in inactive]),
+    }
+    show = show if show in groups or show == "notmine" else ""
+    cards = "".join(
+        f"<a class=card href='/clients?show={key}' style='text-decoration:none;color:inherit;"
+        f"{'outline:2px solid var(--accent)' if key == show else ''}'><div class=label>{label}</div>"
+        f"<div class=big>{len(found)}</div></a>" for key, (label, found) in groups.items())
+    cards += (f"<a class=card href='/clients?show=notmine' style='text-decoration:none;color:inherit;"
+              f"{'outline:2px solid var(--accent)' if show == 'notmine' else ''}'><div class=label>Not my client</div>"
+              f"<div class='big muted'>{len(not_mine)}</div>"
+              f"<div class='small muted'>marked on an ATX list</div></a>")
+    summary = f"<div class=cards>{cards}</div>"
+    if show == "notmine":
+        items = "".join(f"<tr><td>{escape(n)}</td><td class=muted>{escape(', '.join(ys))}</td></tr>"
+                        for n, ys in sorted(not_mine.items(), key=lambda x: x[0].lower()))
+        body = f"""<h1>All clients</h1>
+    {summary}
+    <h2>Not my client</h2>
+    <p class="small muted">People you marked “Not my client” on Not billed yet, and for which tax years.
+      To undo one, open that year on Not billed yet and put them back.</p>
+    <div class=wrap><table class=list><thead><tr><th>Name</th><th>Tax years</th></tr></thead>
+      <tbody>{items or '<tr><td colspan=2 class=muted>Nobody marked yet.</td></tr>'}</tbody></table></div>"""
+        return page("All clients", body, "/clients")
     rows = "".join(
         f"<tr>{tick(c['client'])}<td>{client_link(c['client'])}"
         + (f" <span class='pill muted'>inactive from {escape(inactive[c['client']])}</span>"
@@ -459,9 +490,9 @@ def all_clients(conn: sqlite3.Connection, q: str, message: str = "", today: date
         + f"</td><td class=n>{c['invoices']}</td>"
         f"<td class=n>{money(c['billed'])}</td><td class='n ok'>{money(c['paid'])}</td>"
         f"<td class='n {'owe' if c['owed'] else 'muted'}'>{money(c['owed'])}</td></tr>"
-        for c in reports.clients(conn, q)
+        for c in groups[show][1]
     )
-    back = "/clients" + (f"?q={quote(q)}" if q else "")
+    back = "/clients" + (f"?q={quote(q)}" if q else (f"?show={show}" if show else ""))
     table = f"""<div class=wrap><table class=list><thead><tr>{TICK_ALL}<th>Client</th><th class=n>Invoices</th>
       <th class=n>Billed</th><th class=n>Paid</th><th class=n>Owes</th></tr></thead>
       <tbody>{rows or '<tr><td colspan=6 class=muted>No clients found.</td></tr>'}</tbody></table></div>"""
@@ -475,6 +506,7 @@ def all_clients(conn: sqlite3.Connection, q: str, message: str = "", today: date
     <p><button>Put ticked clients back</button></p></form>"""
     body = f"""<h1>All clients</h1>
     {message}
+    {summary}
     <p class="small muted">Tick clients to act on them, or click a name to see their invoices.</p>
     {FILTER}
     {client_actions(table, back, today, money_actions=True)}
@@ -875,56 +907,58 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
         nb = reports.not_billed(conn, year)
         found = reports.suggestions(conn, year, nb["rows"])
         counts = {k: sum(1 for r in nb["rows"] if r["kind"] == k) for k in KIND_NOTE}
-        def row(r: dict) -> str:
+        back = "/not-billed?year=" + quote(year)
+        forms = []
+
+        def what(r: dict) -> str:
+            """One short line on what the app knows about this person."""
+            if r["maybe"]:
+                return f"Maybe {client_link(r['maybe'])} in TaxDome?"
+            if r.get("company"):
+                return f"Billed with {client_link(r['company'])}, which has no {escape(year)} invoice"
+            guess = found.get(r["name"], {})
+            if guess.get("action") in ("with", "same"):
+                return "Maybe: " + escape(guess["why"])
+            if r["client"]:
+                billed = ", ".join(r["tax_years"])
+                return (f"In TaxDome, billed for {escape(billed)}" if billed else "In TaxDome") + (
+                    f" · <span class=owe>owes {money(r['owed'])}</span>" if r["owed"] else "")
+            return "<span class=muted>Never invoiced in TaxDome</span>"
+
+        def row(i: int, r: dict) -> str:
+            key = r["client"] or r["name"]
+            fid = f"r{i}"
+            forms.append(f"<form id={fid} method=post><input type=hidden name=name value=\"{escape(key)}\">"
+                         f"<input type=hidden name=year value=\"{escape(year)}\">"
+                         f"<input type=hidden name=back value=\"{escape(back)}\"></form>")
+            more = f"/not-billed/review?year={quote(year)}&all=1&name={quote(r['name'])}"
             same = ""
             if r["maybe"]:
-                pair = escape(r['name'] + chr(9) + r['maybe'])
-                same = (f" <button class=small formaction='/not-billed/match' name=match "
-                        f"value=\"{pair}\">Same client</button>"
-                        f" <button class='small secondary' formaction='/not-billed/not-match' name=match "
-                        f"value=\"{pair}\">Not the same</button>")
-            return (
-                f"<tr>{tick(r['client'] or r['name'])}<td>{client_link(r['client']) if r['client'] else escape(r['name'])}"
-                + (f"<span hidden class=alias>{escape(r['name'])}</span>"
-                   if r["client"] and r["client"].lower() != r["name"].lower() else "")
-                + f"</td><td class=small>{KIND_NOTE[r['kind']]}"
-                + (f": maybe {client_link(r['maybe'])}{same}" if r["maybe"] else "")
-                + (f"<div class='small muted'>Billed with {client_link(r['company'])}, which has no "
-                   f"{escape(year)} invoice</div>" if r.get("company") else "")
-                + (f"<div class='small muted'>Best guess: {escape(found[r['name']]['why'])}</div>"
-                   if r["name"] in found and found[r["name"]]["action"] in ("with", "same") else "")
-                + f"</td><td class=muted>{escape(', '.join(r['tax_years'])) or '–'}</td>"
-                f"<td class=muted>{escape(r['last_invoice']) or '–'}</td>"
-                f"<td class='n {'owe' if r['owed'] else 'muted'}'>{money(r['owed'])}</td></tr>")
+                pair = escape(r["name"] + chr(9) + r["maybe"])
+                same = (f"<button class=small form={fid} formaction='/not-billed/match' name=match value=\"{pair}\">"
+                        f"Same client</button> <button class='small secondary' form={fid} "
+                        f"formaction='/not-billed/not-match' name=match value=\"{pair}\">Not the same</button><br>")
+            buttons = same + (f"<button class='small secondary' form={fid} formaction='/not-billed/not-filed'>Not my client for {escape(year)}</button> "
+                       f"<button class='small secondary' form={fid} formaction='/clients/free'>Free return</button> "
+                       f"<a class=small href=\"{escape(more)}\">Billed another way…</a>")
+            name = client_link(r["client"]) if r["client"] else escape(r["name"])
+            alias = (f"<span hidden class=alias>{escape(r['name'])}</span>"
+                     if r["client"] and r["client"].lower() != r["name"].lower() else "")
+            return (f"<tr>{tick(key)}<td>{name}{alias}<div class='small muted'>{what(r)}</div></td>"
+                    f"<td class=small style='white-space:nowrap'>{buttons}</td></tr>")
 
-        rows = "".join(row(r) for r in nb["rows"] if r["kind"] != "never")
-        never = [r for r in nb["rows"] if r["kind"] == "never"]
-        if never:
-            rows += (f"<tr><td colspan=6><details><summary><b>{count(len(never), 'return')} in ATX, never invoiced in "
-                     "TaxDome</b> <span class='small muted'>(free, billed with a company, or billed "
-                     "outside TaxDome? Tick them and use the buttons above). Click to show.</span></summary><table><tbody>"
-                     + "".join(row(r) for r in never) + "</tbody></table></details></td></tr>")
+        rows = "".join(row(i, r) for i, r in enumerate(nb["rows"]))
         table = f"""
-    <div class=cards>
-      <div class=card><div class=label>Not billed for {escape(year)}</div>
-        <div class="big owe">{len(nb['rows'])}</div>
-        <div class="small muted">of {count(nb['listed'], 'return')} on your ATX {escape(year)} list</div></div>
-      <div class=card><div class=label>In TaxDome, no {escape(year)} invoice</div>
-        <div class=big>{counts['in_taxdome']}</div></div>
-      <div class=card><div class=label>Not sure of TaxDome name</div>
-        <div class="big warn">{counts['maybe']}</div></div>
-      <div class=card><div class=label>In ATX, never invoiced in TaxDome</div>
-        <div class="big muted">{counts['never']}</div></div>
-    </div>
-    <p class="small muted">An invoice counts for the tax year written on it (“Tax year {escape(year)}”,
-      “TY {escape(year)}”, “{escape(year)} tax return”). If none is written, it counts for the year before
-      the invoice date, because {escape(year)} returns are usually billed in {int(year) + 1}.
-      <a href="/not-billed.csv?year={quote(year)}">Download this list (CSV)</a></p>
+    <p style="font-size:20px"><b class=owe>{len(nb['rows'])}</b> of {count(nb['listed'], 'return')} on your ATX
+      {escape(year)} list have no {escape(year)} invoice.
+      <a class=btn href="/not-billed/review?year={quote(year)}&all=1" style="margin-left:8px">Go through them one at a time</a></p>
+    <p class="small muted">For each person, press the answer that fits. Anyone you still need to bill, just leave.
+      <a href="/not-billed.csv?year={quote(year)}">Download this list</a></p>
     {quick_fixes_html(conn, year, nb["rows"], found)}
-    {client_actions(f"""<div class=wrap><table class=list><thead><tr>{TICK_ALL}<th>Client</th><th>Why it's here</th>
-      <th>Tax years billed</th><th>Last invoice</th><th class=n>Owes now</th></tr></thead>
-      <tbody>{rows or '<tr><td colspan=6 class=muted>Everyone on this list was billed.</td></tr>'}</tbody>
-    </table></div>""", "/not-billed?year=" + quote(year), today, year=year, companies=company_names(conn))}
+    {client_actions(f"""<div class=wrap><table class=list><thead><tr>{TICK_ALL}<th>Client</th><th></th></tr></thead>
+      <tbody>{rows or '<tr><td colspan=3 class=muted>Everyone on this list was billed.</td></tr>'}</tbody>
+    </table></div>""", back, today, year=year, companies=company_names(conn))}
+    {''.join(forms)}
     {off_list_html(nb["off"], year)}"""
     options = "".join(f"<option{' selected' if y == str(today.year - 1) else ''}>{y}</option>"
                       for y in tax_year_options(today))
@@ -1002,12 +1036,14 @@ def used_note(year: str, used: int) -> str:
 
 
 def review_page(conn: sqlite3.Connection, today: date, year: str, skip: int, used: int = 0,
-                every: bool = False) -> bytes:
+                every: bool = False, name: str = "") -> bytes:
     """One not-billed return at a time, with a best guess and one-click answers."""
     years = [l["year"] for l in db.client_lists(conn)]
     if year not in years:
         return page("Not billed", "<h1>No ATX list for that year</h1><p><a href='/not-billed'>Not billed yet</a></p>")
     queue, found = review_queue(conn, year, every)
+    if name:  # opened from a row on Not billed yet: start at that person
+        skip = next((i for i, r in enumerate(queue) if r["name"] == name), skip)
     also = "&all=1" if every else ""
     back_list = f"/not-billed?year={quote(year)}"
     if skip >= len(queue):
@@ -1080,7 +1116,7 @@ def review_page(conn: sqlite3.Connection, today: date, year: str, skip: int, use
     if r["client"]:
         main.append(post("/not-billed/covered", f"Billed for {escape(year)} on another invoice", "",
                          title=f"One invoice covered {year} and another year, so {year} counts as billed"))
-    main.append(post("/not-billed/not-filed", f"Didn't file for {escape(year)}", "",
+    main.append(post("/not-billed/not-filed", f"Not my client for {escape(year)}", "",
                      title=f"Takes them off the {year} list only"))
     main.append(post("/clients/inactive", f"No longer my client from {escape(year)}", "",
                      title="Leaves the Not billed list from this tax year on"))
@@ -1378,7 +1414,7 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                 elif url.path == "/paid":
                     self._send(paid(conn, year))
                 elif url.path == "/clients":
-                    self._send(all_clients(conn, q.get("q", ""), today=today))
+                    self._send(all_clients(conn, q.get("q", ""), today=today, show=q.get("show", "")))
                 elif url.path == "/client":
                     self._send(client_page(conn, today, q.get("name", "")))
                 elif url.path == "/import":
@@ -1391,7 +1427,8 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                     skip = q.get("skip", "0")
                     used = q.get("used", "0")
                     self._send(review_page(conn, today, q.get("year", ""), int(skip) if skip.isdigit() else 0,
-                                           int(used) if used.isdigit() else 0, every=q.get("all") == "1"))
+                                           int(used) if used.isdigit() else 0, every=q.get("all") == "1",
+                                           name=q.get("name", "")))
                 elif url.path == "/not-billed.csv":
                     self._send(not_billed_csv(conn, q.get("year", "")), "text/csv; charset=utf-8",
                                extra={"Content-Disposition":
