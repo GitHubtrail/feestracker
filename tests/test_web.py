@@ -609,3 +609,21 @@ def test_one_invoice_for_two_tax_years(server, tmp_path):
     assert post_multi(server, "/not-billed/put-back", [("year", "2023"), ("name", "Quill Omar and Rena"),
                                                        ("back", "/not-billed?year=2023")]) == 303
     assert "Taken off the 2023 list" not in get(server + "/not-billed?year=2023")
+
+
+def test_undo_billed_with_from_review_card(server, tmp_path):
+    conn = db.connect(tmp_path / "web.db")
+    conn.execute("INSERT INTO invoices (number, status, client, description, invoice_date, total_cents,"
+                 " paid_cents, balance_cents) VALUES ('8', 'paid', 'Tarn Holdings Inc', 'Returns',"
+                 " '2024-03-01', 100, 100, 0)")
+    conn.commit()
+    post_list(server, "2024", "c.csv", b"Name\nLeo Tarn\n")
+    post_list(server, "2025", "c.csv", b"Name\nLeo Tarn\n")
+    db.link_billed_with(conn, ["Leo Tarn"], "Tarn Holdings Inc")
+    review = get(server + "/not-billed/review?year=2025&all=1")
+    assert "Not billed with Tarn Holdings Inc" in review
+    assert post_multi(server, "/clients/not-billed-with", [("name", "Leo Tarn"), ("list_name", "Leo Tarn"),
+                                                           ("company", "Tarn Holdings Inc"),
+                                                           ("back", "/not-billed/review?year=2024&all=1")]) == 303
+    assert db.billed_with(conn) == {}
+    assert "Yes, billed with Tarn Holdings Inc" not in get(server + "/not-billed/review?year=2024&all=1")

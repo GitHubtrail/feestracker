@@ -283,7 +283,7 @@ def test_suggestions_for_not_billed(conn):
     found = reports.suggestions(conn, "2024", nb["rows"])
     assert found["Nico Rivas"] == {"action": "with", "company": "Rivas Tomas and Lucia", "sure": True,
                                    "why": "Nico is named on Rivas Tomas and Lucia’s invoice."}
-    assert found["Bruno Ferraz"]["company"] == "Ferraz Holdings Inc" and found["Bruno Ferraz"]["sure"]
+    assert found["Bruno Ferraz"]["company"] == "Ferraz Holdings Inc" and not found["Bruno Ferraz"]["sure"]  # last name only: ask
     assert found["Ram Vidal"]["action"] == "same" and found["Ram Vidal"]["client"] == "Vidal Ramon and Ines"
     assert found["Ada Okafor"]["action"] == "bill"
     assert found["Zed Nobody"]["action"] == "free" and "2023, 2024" in found["Zed Nobody"]["why"]
