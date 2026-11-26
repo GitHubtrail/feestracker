@@ -91,6 +91,15 @@ CREATE TABLE IF NOT EXISTS not_matches (
     PRIMARY KEY (list_name, client)
 );
 
+-- Clients billed for a tax year on an invoice the app counts for another year
+-- (one invoice covering 2023 and 2024), so they count as billed for that year.
+CREATE TABLE IF NOT EXISTS covered_years (
+    year      TEXT NOT NULL,
+    name      TEXT NOT NULL,
+    marked_at TEXT NOT NULL,
+    PRIMARY KEY (year, name)
+);
+
 -- Clients on a year's client list that you didn't file for that year, so the
 -- Not billed page leaves them out for that year only.
 CREATE TABLE IF NOT EXISTS not_filed (
@@ -564,6 +573,22 @@ def mark_not_filed(conn: sqlite3.Connection, year: str, names: Iterable[str], fi
         else:
             conn.executemany("INSERT OR IGNORE INTO not_filed (year, name, marked_at) VALUES (?, ?, ?)",
                              [(year, n, now) for n in set(names) if n.strip()])
+
+
+def mark_covered(conn: sqlite3.Connection, year: str, names: Iterable[str], undo: bool = False) -> None:
+    """Note that these clients were billed for a tax year on another invoice (or undo it)."""
+    now = datetime.now().isoformat(timespec="seconds")
+    with conn:
+        if undo:
+            conn.executemany("DELETE FROM covered_years WHERE year = ? AND name = ?", [(year, n) for n in set(names)])
+        else:
+            conn.executemany("INSERT OR IGNORE INTO covered_years (year, name, marked_at) VALUES (?, ?, ?)",
+                             [(year, n, now) for n in set(names) if n.strip()])
+
+
+def covered(conn: sqlite3.Connection, year: str) -> list[str]:
+    return [r[0] for r in conn.execute(
+        "SELECT name FROM covered_years WHERE year = ? ORDER BY name COLLATE NOCASE", (year,))]
 
 
 def not_filed(conn: sqlite3.Connection, year: str) -> list[str]:
