@@ -504,10 +504,11 @@ def suggestions(conn: sqlite3.Connection, year: str, rows: list[dict]) -> dict[s
                 found = {"company": named[0], "sure": True,
                          "why": f"{first.title()} is named on {named[0]}’s invoice."}
             elif len(firms) == 1 and len(same_last) <= 3:
-                found = {"company": firms[0], "sure": len(same_last) == 1,
+                # A shared last name alone is only a guess: always ask, never use it on its own.
+                found = {"company": firms[0], "sure": False,
                          "why": f"{firms[0]} has a {year} invoice and the name {last.title()}."}
             elif len(people) == 1 and len(same_last) <= 2:
-                found = {"company": people[0], "sure": len(same_last) == 1,
+                found = {"company": people[0], "sure": False,
                          "why": f"{people[0]} has a {year} invoice and the same last name. Family?"}
         if (found and not own and not clientlists.is_company(found["company"])
                 and any(w == first or (min(len(w), len(first)) >= 3 and (w.startswith(first) or first.startswith(w)))

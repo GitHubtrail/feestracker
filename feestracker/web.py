@@ -1049,6 +1049,11 @@ def review_page(conn: sqlite3.Connection, today: date, year: str, skip: int, use
         facts.append(f"Billed with {client_link(r['company'])}, which has no {escape(year)} invoice")
 
     main = []
+    if r.get("company"):
+        main.append(post("/clients/not-billed-with", f"Not billed with {escape(r['company'])}", "",
+                         extra=f"<input type=hidden name=company value=\"{escape(r['company'])}\">"
+                               f"<input type=hidden name=list_name value=\"{escape(r['name'])}\">",
+                         title="Undo Billed with: they are different clients"))
     if r["maybe"]:
         pair = escape(r["name"] + chr(9) + r["maybe"])
         main.append(post("/not-billed/match", f"Yes, same client as {escape(r['maybe'])}", "primary",
@@ -1447,6 +1452,19 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
             if path == "/payment":
                 self._payment()
                 return
+            if path == "/clients/not-billed-with":
+                fields = self._fields()
+                conn = db.connect(db_path)
+                try:
+                    names = [n for n in fields.get("name", []) if n.strip()]
+                    company = (fields.get("company") or [""])[0]
+                    db.unlink_billed_with(conn, names)
+                    if company:
+                        for n in set(names) | set(fields.get("list_name", [])):
+                            db.reject_match(conn, n, company)  # so it isn't suggested again
+                finally:
+                    conn.close()
+                return self._go((fields.get("back") or ["/not-billed"])[0], "/not-billed")
             if path in ("/clients/free", "/clients/billed-with", "/not-billed/put-back"):
                 self._list_marks(path)
                 return
