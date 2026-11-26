@@ -1056,10 +1056,17 @@ def review_page(conn: sqlite3.Connection, today: date, year: str, skip: int, use
     if guess.get("action") == "with":
         main.append(post("/clients/billed-with", f"Yes, billed with {escape(guess['company'])}", "primary",
                          extra=f"<input type=hidden name=company value=\"{escape(guess['company'])}\">"))
+        pair = escape(r["name"] + chr(9) + guess["company"])
+        main.append(post("/not-billed/not-match", "No, not family" if "Family" in guess.get("why", "") else "No, not them",
+                         "", extra=f"<input type=hidden name=match value=\"{pair}\">",
+                         title="Different clients. This guess won't be shown again."))
     if guess.get("action") == "same":
         pair = escape(r["name"] + chr(9) + guess["client"])
         main.append(post("/not-billed/match", f"Yes, same client as {escape(guess['client'])}", "primary",
                          extra=f"<input type=hidden name=match value=\"{pair}\">"))
+        main.append(post("/not-billed/not-match", "No, different client", "",
+                         extra=f"<input type=hidden name=match value=\"{pair}\">",
+                         title="This guess won't be shown again."))
     free_cls = "primary" if guess.get("action") == "free" and not main else ""
     main.append(post("/clients/free", "Free return", free_cls,
                      title="You do their return for free and never bill them. Takes them off every year."))

@@ -575,6 +575,12 @@ def test_quick_fixes_and_one_by_one_review(server, tmp_path):
                                                        ("back", "/not-billed/review?year=2024&all=1")]) == 303
     again = get(server + "/not-billed/review?year=2024&all=1")
     assert "Nico Rivas" in again and "Yes, billed with Rivas Tomas and Lucia" in again and "of 2" in again
+    assert "No, not them" in again
+    assert post_multi(server, "/not-billed/not-match", [("match", "Nico Rivas\tRivas Tomas and Lucia"),
+                                                        ("back", "/not-billed/review?year=2024&all=1")]) == 303
+    assert "Yes, billed with Rivas Tomas and Lucia" not in get(server + "/not-billed/review?year=2024&all=1")
+    with db.connect(tmp_path / "web.db") as c:
+        c.execute("DELETE FROM not_matches")
     assert post_multi(server, "/not-billed/apply", [("year", "2024"),
                                                     ("pick", "Nico Rivas\tRivas Tomas and Lucia\twith")]) == 303
     assert "Done: used 1 answer" in get(server + "/not-billed/review?year=2024&used=1")
