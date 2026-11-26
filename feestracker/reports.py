@@ -432,7 +432,7 @@ def not_billed(conn: sqlite3.Connection, year: str) -> dict:
             off.append({"name": shown, "why": "Free return"})
             continue
         if name in not_filed or client in not_filed:
-            off.append({"name": shown, "why": f"Didn't file for {year}"})
+            off.append({"name": shown, "why": f"Not my client for {year}"})
             continue
         if name in covered or client in covered:
             off.append({"name": shown, "why": f"Billed for {year} on another invoice"})
