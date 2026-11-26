@@ -983,13 +983,22 @@ def quick_fixes_html(conn: sqlite3.Connection, year: str, rows: list[dict], foun
     <input type=hidden name=year value="{escape(year)}">
     <p><b>Found {count(len(sure), 'answer')} for you.</b> Untick any that are wrong, then press the button.
       You can put them back later under “Taken off the {escape(year)} list”.</p>
-    <details><summary>Show them</summary><div class=wrap><table class=list><tbody>{''.join(items)}</tbody></table></div></details>
-    <p><button>Use these {len(sure)} answers</button>
-      {f'<span class=small style="margin-left:8px">then</span> {review}' if review else ''}</p>
+    <div class=wrap><table class=list><tbody>{''.join(items)}</tbody></table></div>
+    <p><button>{f'Use these {len(sure)}, then go through the other {rest}' if rest else f'Use these {len(sure)} answers'}</button>
+      {f'<span class=small style="margin-left:8px">or</span> {review}' if review else ''}</p>
     </form></div>"""
 
 
-def review_page(conn: sqlite3.Connection, today: date, year: str, skip: int) -> bytes:
+def used_note(year: str, used: int) -> str:
+    """Says what the Quick fixes button just did, and how to undo it."""
+    if used <= 0:
+        return ""
+    return (f"<div class=note>Done: used {count(used, 'answer')}. They now count as billed for {escape(year)}. "
+            f"To undo one, find it under “Taken off the {escape(year)} list” at the bottom of "
+            f"<a href='/not-billed?year={quote(year)}'>Not billed yet</a> and put it back.</div>")
+
+
+def review_page(conn: sqlite3.Connection, today: date, year: str, skip: int, used: int = 0) -> bytes:
     """One not-billed return at a time, with a best guess and one-click answers."""
     years = [l["year"] for l in db.client_lists(conn)]
     if year not in years:
@@ -999,6 +1008,7 @@ def review_page(conn: sqlite3.Connection, today: date, year: str, skip: int) -> 
     if skip >= len(queue):
         left = len(queue)
         body = f"""<h1>All done for {escape(year)}</h1>
+        {used_note(year, used)}
         <p>{'Nothing left to look at.' if not left else
             f'You skipped {count(left, "return")}. They stay on the list until they are billed in TaxDome.'}</p>
         <p><a class=btn href="{back_list}">Back to Not billed yet</a>
@@ -1066,6 +1076,7 @@ def review_page(conn: sqlite3.Connection, today: date, year: str, skip: int) -> 
     skip_label = "Skip, I still need to bill them" if guess.get("action") == "bill" else "Skip for now"
     body = f"""<p class=small><a href="{back_list}">← Not billed yet for {escape(year)}</a></p>
     <h1>{skip + 1} of {len(queue)} <span class=muted style="font-weight:400">to look at for {escape(year)}</span></h1>
+    {used_note(year, used) if skip == 0 else ""}
     <div class=card style="max-width:760px">
       <div style="font-size:24px;font-weight:650">{escape(r['name'])}</div>
       <p class=muted>{' · '.join(facts)}</p>
@@ -1353,10 +1364,14 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                 elif url.path == "/import":
                     self._send(import_page())
                 elif url.path == "/not-billed":
-                    self._send(not_billed_page(conn, today, q.get("year", "")))
+                    used = q.get("used", "0")
+                    self._send(not_billed_page(conn, today, q.get("year", ""),
+                                               used_note(q.get("year", ""), int(used) if used.isdigit() else 0)))
                 elif url.path == "/not-billed/review":
                     skip = q.get("skip", "0")
-                    self._send(review_page(conn, today, q.get("year", ""), int(skip) if skip.isdigit() else 0))
+                    used = q.get("used", "0")
+                    self._send(review_page(conn, today, q.get("year", ""), int(skip) if skip.isdigit() else 0,
+                                           int(used) if used.isdigit() else 0))
                 elif url.path == "/not-billed.csv":
                     self._send(not_billed_csv(conn, q.get("year", "")), "text/csv; charset=utf-8",
                                extra={"Content-Disposition":
@@ -1575,6 +1590,7 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
             fields = self._fields()
             year = (fields.get("year") or [""])[0]
             conn = db.connect(db_path)
+            used = 0
             try:
                 for pick in fields.get("pick", []):
                     name, _, rest = pick.partition("\t")
@@ -1585,9 +1601,14 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                         db.confirm_match(conn, name, target)
                     elif action == "with":
                         db.link_billed_with(conn, [name], target)
+                    else:
+                        continue
+                    used += 1
+                rest = len(review_queue(conn, year)[0]) if year in [l["year"] for l in db.client_lists(conn)] else 0
             finally:
                 conn.close()
-            self._go("/not-billed?year=" + quote(year), "/not-billed")
+            where = "/not-billed/review" if rest else "/not-billed"
+            self._go(f"{where}?year={quote(year)}&used={used}", "/not-billed")
 
         def _confirm_match(self, same: bool = True):
             length = min(int(self.headers.get("Content-Length") or 0), 1_000_000)
