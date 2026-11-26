@@ -591,3 +591,21 @@ def test_quick_fixes_and_one_by_one_review(server, tmp_path):
     assert post_multi(server, "/clients/free", [("name", "Zed Nobody"), ("back", back)]) == 303
     assert "All done for 2024" in get(server + "/not-billed/review?year=2024")
     assert "All done" in get(server + "/not-billed/review?year=2024&skip=" + quote("5"))
+
+
+def test_one_invoice_for_two_tax_years(server, tmp_path):
+    conn = db.connect(tmp_path / "web.db")
+    conn.execute("INSERT INTO invoices (number, status, client, description, invoice_date, total_cents,"
+                 " paid_cents, balance_cents) VALUES ('7', 'paid', 'Quill Omar and Rena', 'Tax returns',"
+                 " '2025-04-01', 100, 100, 0)")
+    conn.commit()
+    post_list(server, "2023", "c.csv", b"Name\nOmar Quill and Rena Quill\n")
+    review = get(server + "/not-billed/review?year=2023&all=1")
+    assert "Billed for 2023 on another invoice" in review
+    assert post_multi(server, "/not-billed/covered", [("year", "2023"), ("name", "Quill Omar and Rena"),
+                                                      ("back", "/not-billed?year=2023")]) == 303
+    html = get(server + "/not-billed?year=2023")
+    assert "Taken off the 2023 list (1)" in html and "Billed for 2023 on another invoice" in html
+    assert post_multi(server, "/not-billed/put-back", [("year", "2023"), ("name", "Quill Omar and Rena"),
+                                                       ("back", "/not-billed?year=2023")]) == 303
+    assert "Taken off the 2023 list" not in get(server + "/not-billed?year=2023")

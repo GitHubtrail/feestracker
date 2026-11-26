@@ -413,6 +413,8 @@ def client_actions(table: str, back: str, today: date, *, year: str = "", money_
         buttons.append(
             f"<button formaction='/not-billed/not-filed' class=secondary "
             f"title='Takes them off the {escape(year)} list only'>Didn't file for {escape(year)}</button>"
+            f"<button formaction='/not-billed/covered' class=secondary "
+            f"title='One invoice covered {escape(year)} and another year'>Billed on another invoice</button>"
             "<button formaction='/clients/free' class=secondary "
             "title='You do their return for free and never bill them. Takes them off every year.'>"
             "Free return</button>"
@@ -1070,6 +1072,9 @@ def review_page(conn: sqlite3.Connection, today: date, year: str, skip: int, use
     free_cls = "primary" if guess.get("action") == "free" and not main else ""
     main.append(post("/clients/free", "Free return", free_cls,
                      title="You do their return for free and never bill them. Takes them off every year."))
+    if r["client"]:
+        main.append(post("/not-billed/covered", f"Billed for {escape(year)} on another invoice", "",
+                         title=f"One invoice covered {year} and another year, so {year} counts as billed"))
     main.append(post("/not-billed/not-filed", f"Didn't file for {escape(year)}", "",
                      title=f"Takes them off the {year} list only"))
     main.append(post("/clients/inactive", f"No longer my client from {escape(year)}", "",
@@ -1427,8 +1432,8 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
             if path == "/not-billed/apply":
                 self._apply_suggestions()
                 return
-            if path == "/not-billed/not-filed":
-                self._not_filed()
+            if path in ("/not-billed/not-filed", "/not-billed/covered"):
+                self._not_filed(covered=path == "/not-billed/covered")
                 return
             if path in ("/not-billed/match", "/not-billed/not-match"):
                 self._confirm_match(same=path == "/not-billed/match")
@@ -1580,7 +1585,7 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                     conn.close()
             self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
 
-        def _not_filed(self):
+        def _not_filed(self, covered: bool = False):
             length = min(int(self.headers.get("Content-Length") or 0), 1_000_000)
             fields = parse_qs(self.rfile.read(length).decode("utf-8"))
             year = (fields.get("year") or [""])[0]
@@ -1590,7 +1595,10 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
             if year and fields.get("name"):
                 conn = db.connect(db_path)
                 try:
-                    db.mark_not_filed(conn, year, fields["name"], filed=bool(fields.get("filed")))
+                    if covered:
+                        db.mark_covered(conn, year, fields["name"])
+                    else:
+                        db.mark_not_filed(conn, year, fields["name"], filed=bool(fields.get("filed")))
                 finally:
                     conn.close()
             self._send(b"", status=HTTPStatus.SEE_OTHER, extra={"Location": back})
@@ -1748,6 +1756,7 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                     year = (fields.get("year") or [""])[0]
                     if year:
                         db.mark_not_filed(conn, year, names, filed=True)
+                        db.mark_covered(conn, year, names, undo=True)
                     db.set_free(conn, names, free=False)
                     db.unlink_billed_with(conn, names)
                     db.forget_matches(conn, names)

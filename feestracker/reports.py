@@ -411,6 +411,7 @@ def not_billed(conn: sqlite3.Connection, year: str) -> dict:
     aliases = db.list_aliases(conn)
     with_company = db.billed_with(conn)
     not_filed = set(db.not_filed(conn, year))
+    covered = set(db.covered(conn, year))
     free = set(db.free_clients(conn))
     inactive = {n for n, y in db.inactive_clients(conn).items() if y <= year}
     rows, off = [], []
@@ -432,6 +433,9 @@ def not_billed(conn: sqlite3.Connection, year: str) -> dict:
             continue
         if name in not_filed or client in not_filed:
             off.append({"name": shown, "why": f"Didn't file for {year}"})
+            continue
+        if name in covered or client in covered:
+            off.append({"name": shown, "why": f"Billed for {year} on another invoice"})
             continue
         billed = sorted(years.get(client, set())) if client else []
         if year in billed:
