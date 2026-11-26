@@ -414,6 +414,12 @@ def name_matches(conn: sqlite3.Connection) -> dict[str, str]:
     return {r[0]: r[1] for r in conn.execute("SELECT list_name, client FROM name_matches")}
 
 
+def forget_matches(conn: sqlite3.Connection, list_names: Iterable[str]) -> None:
+    """Undo "same client" answers, so these list names are matched (or asked about) again."""
+    with conn:
+        conn.executemany("DELETE FROM name_matches WHERE list_name = ?", [(n,) for n in set(list_names)])
+
+
 def reject_match(conn: sqlite3.Connection, list_name: str, client: str) -> None:
     """Remember that a name on a client list is not this TaxDome client, so it isn't guessed again."""
     with conn:

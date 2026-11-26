@@ -435,6 +435,9 @@ def not_billed(conn: sqlite3.Connection, year: str) -> dict:
             continue
         billed = sorted(years.get(client, set())) if client else []
         if year in billed:
+            if confirmed.get(name) == client and not (m.same and m.found == client):
+                # You said this is the same client: show it, so the answer can be checked again.
+                off.append({"name": name, "why": f"Same as {client} in TaxDome"})
             continue
         company = with_company.get(client or "") or with_company.get(name)
         if company and year in years.get(company, set()):
