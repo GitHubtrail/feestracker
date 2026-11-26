@@ -950,11 +950,12 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
 REVIEW_ORDER = {"maybe": 0, "with": 1, "same": 1, "bill": 2, "free": 3}
 
 
-def review_queue(conn: sqlite3.Connection, year: str) -> tuple[list[dict], dict[str, dict]]:
-    """The returns still to look at one by one: sure guesses are left for the Quick fixes box."""
+def review_queue(conn: sqlite3.Connection, year: str, every: bool = False) -> tuple[list[dict], dict[str, dict]]:
+    """The returns still to look at one by one: sure guesses are left for the Quick fixes box,
+    unless every one is wanted (checking answers again)."""
     nb = reports.not_billed(conn, year)
     found = reports.suggestions(conn, year, nb["rows"])
-    rows = [r for r in nb["rows"] if not found.get(r["name"], {}).get("sure")]
+    rows = [r for r in nb["rows"] if every or not found.get(r["name"], {}).get("sure")]
     rows.sort(key=lambda r: (0 if r["kind"] == "maybe" else REVIEW_ORDER.get(found.get(r["name"], {}).get("action"), 4),
                              r["name"].lower()))
     return rows, found
@@ -998,12 +999,14 @@ def used_note(year: str, used: int) -> str:
             f"<a href='/not-billed?year={quote(year)}'>Not billed yet</a> and put it back.</div>")
 
 
-def review_page(conn: sqlite3.Connection, today: date, year: str, skip: int, used: int = 0) -> bytes:
+def review_page(conn: sqlite3.Connection, today: date, year: str, skip: int, used: int = 0,
+                every: bool = False) -> bytes:
     """One not-billed return at a time, with a best guess and one-click answers."""
     years = [l["year"] for l in db.client_lists(conn)]
     if year not in years:
         return page("Not billed", "<h1>No ATX list for that year</h1><p><a href='/not-billed'>Not billed yet</a></p>")
-    queue, found = review_queue(conn, year)
+    queue, found = review_queue(conn, year, every)
+    also = "&all=1" if every else ""
     back_list = f"/not-billed?year={quote(year)}"
     if skip >= len(queue):
         left = len(queue)
@@ -1012,13 +1015,13 @@ def review_page(conn: sqlite3.Connection, today: date, year: str, skip: int, use
         <p>{'Nothing left to look at.' if not left else
             f'You skipped {count(left, "return")}. They stay on the list until they are billed in TaxDome.'}</p>
         <p><a class=btn href="{back_list}">Back to Not billed yet</a>
-          {f'<a class=btn href="/not-billed/review?year={quote(year)}" style="margin-left:8px">Start again</a>' if left else ''}</p>"""
+          {f'<a class=btn href="/not-billed/review?year={quote(year)}{also}" style="margin-left:8px">Start again</a>' if left else ''}</p>"""
         return page("Not billed", body, "/not-billed")
     r = queue[skip]
     key = r["client"] or r["name"]
     guess = found.get(r["name"], {})
-    here = f"/not-billed/review?year={quote(year)}&skip={skip}"
-    nxt = f"/not-billed/review?year={quote(year)}&skip={skip + 1}"
+    here = f"/not-billed/review?year={quote(year)}&skip={skip}{also}"
+    nxt = f"/not-billed/review?year={quote(year)}&skip={skip + 1}{also}"
 
     def post(action: str, label: str, cls: str = "", extra: str = "", title: str = "") -> str:
         return (f"<form method=post action='{action}'>"
@@ -1053,10 +1056,17 @@ def review_page(conn: sqlite3.Connection, today: date, year: str, skip: int, use
     if guess.get("action") == "with":
         main.append(post("/clients/billed-with", f"Yes, billed with {escape(guess['company'])}", "primary",
                          extra=f"<input type=hidden name=company value=\"{escape(guess['company'])}\">"))
+        pair = escape(r["name"] + chr(9) + guess["company"])
+        main.append(post("/not-billed/not-match", "No, not family" if "Family" in guess.get("why", "") else "No, not them",
+                         "", extra=f"<input type=hidden name=match value=\"{pair}\">",
+                         title="Different clients. This guess won't be shown again."))
     if guess.get("action") == "same":
         pair = escape(r["name"] + chr(9) + guess["client"])
         main.append(post("/not-billed/match", f"Yes, same client as {escape(guess['client'])}", "primary",
                          extra=f"<input type=hidden name=match value=\"{pair}\">"))
+        main.append(post("/not-billed/not-match", "No, different client", "",
+                         extra=f"<input type=hidden name=match value=\"{pair}\">",
+                         title="This guess won't be shown again."))
     free_cls = "primary" if guess.get("action") == "free" and not main else ""
     main.append(post("/clients/free", "Free return", free_cls,
                      title="You do their return for free and never bill them. Takes them off every year."))
@@ -1188,10 +1198,10 @@ def off_list_html(off: list[dict], year: str) -> str:
     return f"""<h2>Taken off the {escape(year)} list ({len(off)})</h2>
     <form method=post action="/not-billed/put-back">
     <input type=hidden name=year value="{escape(year)}">
-    <input type=hidden name=back value="/not-billed?year={quote(year)}">
     <div class=wrap><table class=list><thead><tr>{TICK_ALL}<th>Client</th><th>Why</th></tr></thead>
       <tbody>{items}</tbody></table></div>
-    <p><button>Put ticked clients back on the list</button></p></form>"""
+    <p><button name=back value="/not-billed/review?year={quote(year)}&amp;all=1">Check ticked clients again, one at a time</button>
+      <button class=secondary name=back value="/not-billed?year={quote(year)}">Put ticked clients back on the list</button></p></form>"""
 
 
 def not_billed_csv(conn: sqlite3.Connection, year: str) -> bytes:
@@ -1371,7 +1381,7 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                     skip = q.get("skip", "0")
                     used = q.get("used", "0")
                     self._send(review_page(conn, today, q.get("year", ""), int(skip) if skip.isdigit() else 0,
-                                           int(used) if used.isdigit() else 0))
+                                           int(used) if used.isdigit() else 0, every=q.get("all") == "1"))
                 elif url.path == "/not-billed.csv":
                     self._send(not_billed_csv(conn, q.get("year", "")), "text/csv; charset=utf-8",
                                extra={"Content-Disposition":
@@ -1740,6 +1750,7 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                         db.mark_not_filed(conn, year, names, filed=True)
                     db.set_free(conn, names, free=False)
                     db.unlink_billed_with(conn, names)
+                    db.forget_matches(conn, names)
             finally:
                 conn.close()
             self._go(back, "/not-billed")

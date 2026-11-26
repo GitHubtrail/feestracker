@@ -435,6 +435,9 @@ def not_billed(conn: sqlite3.Connection, year: str) -> dict:
             continue
         billed = sorted(years.get(client, set())) if client else []
         if year in billed:
+            if confirmed.get(name) == client and not (m.same and m.found == client):
+                # You said this is the same client: show it, so the answer can be checked again.
+                off.append({"name": name, "why": f"Same as {client} in TaxDome"})
             continue
         company = with_company.get(client or "") or with_company.get(name)
         if company and year in years.get(company, set()):
@@ -479,15 +482,17 @@ def suggestions(conn: sqlite3.Connection, year: str, rows: list[dict]) -> dict[s
         for w in clientlists.words(c):
             by_word.setdefault(w, []).append(c)
     lists = {y: set(db.client_list_names(conn, y)) for y in [l["year"] for l in db.client_lists(conn)]}
+    rejected = db.not_matches(conn)  # "No, not family" / "Not the same" answers
     out: dict[str, dict] = {}
     for r in rows:
         name, own = r["name"], r.get("client")
         first, last = _first_last(name)
         found = None
         if first and not clientlists.is_company(name) and len(last) >= 3:
-            named = [c for c in billed if c != own and last in clientlists.words(c)
+            no = rejected.get(name, frozenset()) | {own}
+            named = [c for c in billed if c not in no and last in clientlists.words(c)
                      and len(first) >= 3 and first in texts.get(c, set())]
-            same_last = [c for c in by_word.get(last, []) if c != own]
+            same_last = [c for c in by_word.get(last, []) if c not in no]
             people = [c for c in same_last if c in billed and not clientlists.is_company(c)]
             firms = [c for c in same_last if c in billed and clientlists.is_company(c)
                      and last not in clientlists.GENERIC_WORDS and len(last) >= 4]

@@ -376,6 +376,10 @@ def test_same_client_button_and_folded_never_list(server, tmp_path):
     assert status == 303
     html = get(server + "/not-billed?year=2024")
     assert "Same client" not in html and "Acme Bakery, LLC" in html and "On your list as" not in html
+    # A "same client" answer can be undone with Put back.
+    assert post_multi(server, "/not-billed/put-back", [("year", "2024"), ("name", "Acme Bakery Kitchen"),
+                                                       ("back", "/not-billed?year=2024")]) == 303
+    assert "Same client" in get(server + "/not-billed?year=2024")
 
 
 def test_not_the_same_button_drops_the_guess(server, tmp_path):
@@ -565,6 +569,20 @@ def test_quick_fixes_and_one_by_one_review(server, tmp_path):
     assert post_multi(server, "/not-billed/apply", [("year", "2024"),
                                                     ("pick", "Nico Rivas\tRivas Tomas and Lucia\twith")]) == 303
     assert "Billed with Rivas Tomas and Lucia" in get(server + "/not-billed?year=2024")
+    # Check a used answer again: put it back and see it in the one-at-a-time review.
+    assert "Check ticked clients again, one at a time" in get(server + "/not-billed?year=2024")
+    assert post_multi(server, "/not-billed/put-back", [("year", "2024"), ("name", "Nico Rivas"),
+                                                       ("back", "/not-billed/review?year=2024&all=1")]) == 303
+    again = get(server + "/not-billed/review?year=2024&all=1")
+    assert "Nico Rivas" in again and "Yes, billed with Rivas Tomas and Lucia" in again and "of 2" in again
+    assert "No, not them" in again
+    assert post_multi(server, "/not-billed/not-match", [("match", "Nico Rivas\tRivas Tomas and Lucia"),
+                                                        ("back", "/not-billed/review?year=2024&all=1")]) == 303
+    assert "Yes, billed with Rivas Tomas and Lucia" not in get(server + "/not-billed/review?year=2024&all=1")
+    with db.connect(tmp_path / "web.db") as c:
+        c.execute("DELETE FROM not_matches")
+    assert post_multi(server, "/not-billed/apply", [("year", "2024"),
+                                                    ("pick", "Nico Rivas\tRivas Tomas and Lucia\twith")]) == 303
     assert "Done: used 1 answer" in get(server + "/not-billed/review?year=2024&used=1")
     assert "Done: used 1 answer" in get(server + "/not-billed?year=2024&used=1")
     review = get(server + "/not-billed/review?year=2024")
