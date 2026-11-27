@@ -655,7 +655,7 @@ def test_all_clients_summary(server, tmp_path):
 EFILE = (b'"Return Name","Client #","Complete","E-file ID","Jurisdiction","Sub Type","Status","Type"\n'
          b'"Quill, Omar and Rena - MFJ","","","1","Federal","Federal","AcceptedWithMessages","1040"\n'
          b'"Quill, Omar and Rena - MFJ","","","2","IL","Return","Accepted","IL-1040"\n'
-         b'"Tarn Holdings Inc","","","3","Federal","Federal","Accepted","1120S"\n'
+         b'"Tarn Holdings Inc-1120S","","","3","Federal","Federal","Accepted","1120S"\n'
          b'"Vale Ivo","","","4","Federal","Extension","Accepted","4868"\n'
          b'"Moss Ada","","","5","Federal","Federal","RejectedByUser","1040"\n')
 
