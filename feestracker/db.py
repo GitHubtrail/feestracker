@@ -101,6 +101,14 @@ CREATE TABLE IF NOT EXISTS efiled_names (
 
 -- Clients billed for a tax year on an invoice the app counts for another year
 -- (one invoice covering 2023 and 2024), so they count as billed for that year.
+-- Tax year you set by hand for one invoice ("this invoice is for 2024"). Wins over
+-- every rule that reads the year from the invoice, and survives new imports.
+CREATE TABLE IF NOT EXISTS invoice_years (
+    number  TEXT PRIMARY KEY,
+    year    TEXT NOT NULL,
+    set_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS covered_years (
     year      TEXT NOT NULL,
     name      TEXT NOT NULL,
@@ -397,6 +405,20 @@ def remove_invoices(conn: sqlite3.Connection, numbers: Iterable[str]) -> int:
     with conn:
         return conn.executemany("INSERT OR IGNORE INTO removed_invoices (number, removed_at) VALUES (?, ?)",
                                 [(n, now) for n in numbers if n and not is_outside(n)]).rowcount
+
+
+def set_invoice_year(conn: sqlite3.Connection, number: str, year: str) -> None:
+    """Sets the tax year of one invoice by hand; an empty year goes back to the app's guess."""
+    with conn:
+        if year:
+            conn.execute("INSERT OR REPLACE INTO invoice_years (number, year, set_at) VALUES (?, ?, ?)",
+                         (number, year, datetime.now().isoformat(timespec="seconds")))
+        else:
+            conn.execute("DELETE FROM invoice_years WHERE number = ?", (number,))
+
+
+def invoice_years(conn: sqlite3.Connection) -> dict[str, str]:
+    return {r[0]: r[1] for r in conn.execute("SELECT number, year FROM invoice_years")}
 
 
 def restore_invoices(conn: sqlite3.Connection, numbers: Iterable[str]) -> None:

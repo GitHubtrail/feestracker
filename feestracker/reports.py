@@ -360,6 +360,15 @@ RETURN_LINE = re.compile(r"return|1040|1120|1065|preparation", re.I)
 
 
 def client_tax_years(conn: sqlite3.Connection) -> dict[str, set[str]]:
+    return _tax_years(conn)[0]
+
+
+def invoice_tax_years(conn: sqlite3.Connection) -> dict[str, set[str]]:
+    """Per invoice number, the tax years it counts for."""
+    return _tax_years(conn)[1]
+
+
+def _tax_years(conn: sqlite3.Connection) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
     """Per client, the tax years they have been invoiced for.
 
     An invoice copied from last year often keeps last year's text ("Tax Year 2023"
@@ -371,12 +380,18 @@ def client_tax_years(conn: sqlite3.Connection) -> dict[str, set[str]]:
     for r in conn.execute("SELECT invoice_number, title FROM line_items WHERE kind = 'service'"):
         titles.setdefault(r["invoice_number"], []).append(r["title"])
     out: dict[str, set[str]] = {}
+    per_invoice: dict[str, set[str]] = {}
+    by_hand = db.invoice_years(conn)
     guessed: dict[str, set[str]] = {}  # years taken by invoices with no year written
     for r in conn.execute("SELECT number, client, invoice_date, description FROM invoices "
                           "WHERE number NOT IN (SELECT number FROM removed_invoices) "
                           "ORDER BY client, invoice_date, number"):
         seen = out.setdefault(r["client"], set())
         inferred = guessed.setdefault(r["client"], set())
+        if r["number"] in by_hand:
+            seen.add(by_hand[r["number"]])
+            per_invoice[r["number"]] = {by_hand[r["number"]]}
+            continue
         years = tax_years_of(r["description"] or "", r["invoice_date"], titles.get(r["number"], []))
         billed_in = r["invoice_date"][:4]
         if (billed_in.isdigit() and years and years <= seen
@@ -399,7 +414,8 @@ def client_tax_years(conn: sqlite3.Connection) -> dict[str, set[str]]:
                     and all(int(x) < y - 1 for x in seen)):
                 years = {str(y - 1), str(y)}
         seen.update(years)
-    return out
+        per_invoice[r["number"]] = set(years)
+    return out, per_invoice
 
 
 def apply_efiled(conn: sqlite3.Connection, year: str, filed: list[str], source: str = "") -> dict[str, int]:

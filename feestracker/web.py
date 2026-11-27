@@ -556,6 +556,8 @@ def client_page(conn: sqlite3.Connection, today: date, name: str) -> bytes:
     owed = sum(i["owed_cents"] for i in invoices)
     written_off = sum(i["written_off_cents"] for i in invoices)
     open_invs = [i for i in invoices if i["owed_cents"] > 0]
+    tax_years = reports.invoice_tax_years(conn)
+    by_hand = db.invoice_years(conn)
     rows = []
     for i in invoices:
         services = "<br>".join(
@@ -573,7 +575,9 @@ def client_page(conn: sqlite3.Connection, today: date, name: str) -> bytes:
             + (f"<div class=small><a href='/outside?edit={quote(i['number'])}'>Edit</a></div>"
                if db.is_outside(i["number"]) else "")
             + remove_invoice_button(i["number"], name)
-            + f"</td><td>{escape(i['invoice_date'][:10])}</td>"
+            + f"</td><td>{escape(i['invoice_date'][:10])}"
+            + tax_year_form(i["number"], name, tax_years.get(i["number"], set()), i["number"] in by_hand, today)
+            + "</td>"
             f"<td><span class='pill {STATUS_CLASS.get(i['status'], '')}'>{escape(i['status'])}</span>{age}</td>"
             f"<td class=small>{services}</td><td class=n>{money(i['total_cents'])}</td>"
             f"<td class='n ok'>{paid_cell(conn, i, name)}</td>"
@@ -607,6 +611,22 @@ def client_page(conn: sqlite3.Connection, today: date, name: str) -> bytes:
     <h2>More</h2>
     {inactive_box(conn, name, today)}"""
     return page(name, body)
+
+
+def tax_year_form(number: str, client: str, years: set[str], by_hand: bool, today: date) -> str:
+    """Shows which tax year an invoice counts for, and lets you change it (a late return
+    billed a year later, say). Choosing the app's own guess again undoes the change."""
+    shown = " and ".join(sorted(years)) or "none"
+    current = next(iter(years)) if len(years) == 1 else ""
+    opts = "".join(f"<option{' selected' if y == current else ''}>{y}</option>" for y in tax_year_options(today))
+    undo = "<option value=''>Let the app decide</option>" if by_hand else ""
+    return (f"<form class='act small' method=post action='/invoices/tax-year' style='white-space:nowrap'>"
+            f"<input type=hidden name=number value=\"{escape(number)}\">"
+            f"<input type=hidden name=back value=\"/client?name={escape(quote(client))}\">"
+            f"<span class=muted>Tax year</span> <select name=year onchange='this.form.submit()' "
+            f"title='Change it if this invoice is for another year'>"
+            + ("" if current else f"<option selected disabled>{escape(shown)}</option>")
+            + f"{opts}{undo}</select>{' <span class=muted>(set by you)</span>' if by_hand else ''}</form>")
 
 
 def remove_invoice_button(number: str, client: str) -> str:
@@ -1597,6 +1617,17 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
             if path in ("/clients/free", "/clients/billed-with", "/not-billed/put-back"):
                 self._list_marks(path)
                 return
+            if path == "/invoices/tax-year":
+                fields = self._fields()
+                number = (fields.get("number") or [""])[0]
+                year = (fields.get("year") or [""])[0]
+                if number and (year == "" or (year.isdigit() and len(year) == 4)):
+                    conn = db.connect(db_path)
+                    try:
+                        db.set_invoice_year(conn, number, year)
+                    finally:
+                        conn.close()
+                return self._go((fields.get("back") or ["/"])[0])
             if path in ("/invoices/remove", "/invoices/restore"):
                 fields = self._fields()
                 conn = db.connect(db_path)
