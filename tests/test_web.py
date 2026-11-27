@@ -676,6 +676,7 @@ def test_carry_not_my_client_to_next_year(server, tmp_path):
     post_list(server, "2023", "c.csv", b"Name\nZed Nobody\nAmy Other\n")
     post_list(server, "2024", "c.csv", b"Name\nZed Nobody\nAmy Other\n")
     post_multi(server, "/not-billed/not-filed", [("name", "Zed Nobody"), ("name", "Amy Other"), ("year", "2023")])
+    assert "first upload your 2024 e-file list" in get(server + "/not-billed?year=2024")
     db.save_efiled(db.connect(tmp_path / "web.db"), "2024", ["Amy Other"])  # Amy filed for 2024
     html = get(server + "/not-billed?year=2024")
     assert "1 person you marked Not my client for 2023" in html and "Mark the ticked ones Not my client for 2024" in html

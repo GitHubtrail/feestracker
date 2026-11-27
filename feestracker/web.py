@@ -1008,6 +1008,10 @@ def carry_html(conn: sqlite3.Connection, year: str, rows: list[dict]) -> str:
     if not names:
         return ""
     prev = str(int(year) - 1)
+    if not db.efiled(conn, year):
+        # Without this year's accepted returns we can't tell who filed, so don't offer it yet.
+        return (f"<div class=note>To carry your {escape(prev)} “Not my client” answers to {escape(year)}, first upload "
+                f"your {escape(year)} e-file list below. Then anyone who filed for {escape(year)} is left out.</div>")
     by_key = {r["client"] or r["name"]: r for r in rows}
     items = []
     for n in names:
@@ -1027,7 +1031,6 @@ def carry_html(conn: sqlite3.Connection, year: str, rows: list[dict]) -> str:
     <div class=wrap><table class=list><tbody>{''.join(items)}</tbody></table></div>
     <p><button>Mark the ticked ones Not my client for {escape(year)}</button>
       <span class="small muted">You can put anyone back under “Taken off the {escape(year)} list”.</span></p>
-    {'' if db.efiled(conn, year) else f'<p class="small muted">Upload your {escape(year)} e-file list first, so anyone who filed for {escape(year)} is left out.</p>'}
     </form></div>"""
 
 
