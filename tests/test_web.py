@@ -594,6 +594,28 @@ def test_quick_fixes_and_one_by_one_review(server, tmp_path):
     assert "All done" in get(server + "/not-billed/review?year=2024&skip=" + quote("5"))
 
 
+def test_set_an_invoices_tax_year_by_hand(server, tmp_path):
+    from urllib.parse import quote
+    conn = db.connect(tmp_path / "web.db")
+    conn.execute("INSERT INTO invoices (number, status, client, description, invoice_date, total_cents,"
+                 " paid_cents, balance_cents) VALUES ('5', 'unpaid', 'Lark Ida', 'Tax return',"
+                 " '2026-11-21', 100, 0, 100)")
+    conn.commit()
+    post_list(server, "2024", "c.csv", b"Name\nIda Lark\n")
+    assert "Ida Lark" in get(server + "/not-billed?year=2024")
+    page_ = get(server + "/client?name=" + quote("Lark Ida"))
+    assert "Tax year" in page_ and "<option selected>2025</option>" in page_
+    back = "/client?name=" + quote("Lark Ida")
+    assert post_multi(server, "/invoices/tax-year", [("number", "5"), ("year", "2024"), ("back", back)]) == 303
+    assert "Ida Lark" not in get(server + "/not-billed?year=2024").split("Taken off")[0]
+    page_ = get(server + back)
+    assert "<option selected>2024</option>" in page_ and "set by you" in page_
+    upload(server, FIXTURE.read_bytes())  # survives a new import
+    assert "set by you" in get(server + back)
+    assert post_multi(server, "/invoices/tax-year", [("number", "5"), ("year", ""), ("back", back)]) == 303
+    assert "set by you" not in get(server + back)
+
+
 def test_one_invoice_for_two_tax_years(server, tmp_path):
     conn = db.connect(tmp_path / "web.db")
     conn.execute("INSERT INTO invoices (number, status, client, description, invoice_date, total_cents,"
