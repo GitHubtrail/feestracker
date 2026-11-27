@@ -995,6 +995,7 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
       <a href="/not-billed.csv?year={quote(year)}">Download this list</a></p>
     {carry_html(conn, year, nb["rows"])}
     {carry_outside_html(conn, today, year, nb["rows"])}
+    {late_bills_html(conn, year)}
     {quick_fixes_html(conn, year, nb["rows"], found)}
     {client_actions(f"""<div class=wrap><table class=list><thead><tr>{TICK_ALL}<th>Client</th><th></th></tr></thead>
       <tbody>{rows or '<tr><td colspan=3 class=muted>Everyone on this list was billed.</td></tr>'}</tbody>
@@ -1101,6 +1102,34 @@ def carry_outside_html(conn: sqlite3.Connection, today: date, year: str, rows: l
       <tbody>{items}</tbody></table></div>
     <p><label>Billed on <input type=date name=billed_on value="{today.isoformat()}" required></label>
       <button>Add these {escape(year)} bills outside TaxDome</button></p>
+    </form></div>"""
+
+
+def late_bills_html(conn: sqlite3.Connection, year: str) -> str:
+    """Bills counted for next year that look like this year's late return: one press
+    sets their tax year to this year (undone on the client page)."""
+    found = reports.late_bills(conn, year)
+    if not found:
+        return ""
+    nxt = str(int(year) + 1)
+    found.sort(key=lambda b: (not b["sure"], b["client"].lower()))
+    items = "".join(
+        f"<tr><td class=tick><input type=checkbox name=number value=\"{escape(b['number'])}\"{' checked' if b['sure'] else ''}></td>"
+        f"<td>{client_link(b['client'])}</td><td>{escape(b['date'])}</td><td class=n>{money(b['total_cents'])}</td>"
+        f"<td class='small muted'>{'Two bills for ' + nxt + ', none for ' + year if b['two'] else 'No accepted ' + nxt + ' return'}</td></tr>"
+        for b in found)
+    sure = sum(b["sure"] for b in found)
+    n = len(found)
+    return f"""<div class=note><form method=post action="/invoices/tax-year">
+    <input type=hidden name=year value="{escape(year)}">
+    <input type=hidden name=back value="/not-billed?year={quote(year)}">
+    <p><b>{n} {'bill' if n == 1 else 'bills'} counted for {nxt} may really be for {escape(year)}.</b>
+      {'They have' if n > 1 else 'It has'} no year written on {'them' if n > 1 else 'it'}, and the client filed for {escape(year)} with no {escape(year)} invoice.
+      {f'The {sure} I’m most sure of are ticked. ' if sure and n > 1 else ('It’s ticked. ' if sure else '')}Tick the right ones and press the button.
+      You can change a bill back on the client page.</p>
+    <div class=wrap><table class=list><thead><tr>{TICK_ALL}<th>Client</th><th>Bill date</th><th class=n>Amount</th><th>Why</th></tr></thead>
+      <tbody>{items}</tbody></table></div>
+    <p><button>Count the ticked bills for {escape(year)}</button></p>
     </form></div>"""
 
 
@@ -1619,12 +1648,13 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                 return
             if path == "/invoices/tax-year":
                 fields = self._fields()
-                number = (fields.get("number") or [""])[0]
+                numbers = [n for n in fields.get("number", []) if n]
                 year = (fields.get("year") or [""])[0]
-                if number and (year == "" or (year.isdigit() and len(year) == 4)):
+                if numbers and (year == "" or (year.isdigit() and len(year) == 4)):
                     conn = db.connect(db_path)
                     try:
-                        db.set_invoice_year(conn, number, year)
+                        for number in numbers:
+                            db.set_invoice_year(conn, number, year)
                     finally:
                         conn.close()
                 return self._go((fields.get("back") or ["/"])[0])

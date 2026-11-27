@@ -616,6 +616,23 @@ def test_set_an_invoices_tax_year_by_hand(server, tmp_path):
     assert "set by you" not in get(server + back)
 
 
+def test_late_bills_box_counts_them_for_the_year(server, tmp_path):
+    conn = db.connect(tmp_path / "web.db")
+    conn.execute("INSERT INTO invoices (number, status, client, description, invoice_date, total_cents,"
+                 " paid_cents, balance_cents) VALUES ('5', 'unpaid', 'Lark Ida', 'Tax return',"
+                 " '2026-11-21', 100, 0, 100)")
+    conn.commit()
+    post_list(server, "2024", "c.csv", b"Name\nIda Lark\n")
+    assert "may really be for 2024" not in get(server + "/not-billed?year=2024")  # no 2025 e-file list yet
+    db.save_efiled(conn, "2025", ["Someone Else"])
+    html = get(server + "/not-billed?year=2024")
+    assert "1 bill counted for 2025 may really be for 2024" in html and 'value="5" checked' in html
+    assert post_multi(server, "/invoices/tax-year", [("number", "5"), ("year", "2024"),
+                                                     ("back", "/not-billed?year=2024")]) == 303
+    html = get(server + "/not-billed?year=2024")
+    assert "may really be for 2024" not in html and "Ida Lark" not in html.split("Taken off")[0]
+
+
 def test_one_invoice_for_two_tax_years(server, tmp_path):
     conn = db.connect(tmp_path / "web.db")
     conn.execute("INSERT INTO invoices (number, status, client, description, invoice_date, total_cents,"
