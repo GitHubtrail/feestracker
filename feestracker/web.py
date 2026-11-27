@@ -955,6 +955,7 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
       <a class=btn href="/not-billed/review?year={quote(year)}&all=1" style="margin-left:8px">Go through them one at a time</a></p>
     <p class="small muted">For each person, press the answer that fits. Anyone you still need to bill, just leave.
       <a href="/not-billed.csv?year={quote(year)}">Download this list</a></p>
+    {carry_html(conn, year, nb["rows"])}
     {quick_fixes_html(conn, year, nb["rows"], found)}
     {client_actions(f"""<div class=wrap><table class=list><thead><tr>{TICK_ALL}<th>Client</th><th></th></tr></thead>
       <tbody>{rows or '<tr><td colspan=3 class=muted>Everyone on this list was billed.</td></tr>'}</tbody>
@@ -999,6 +1000,25 @@ def review_queue(conn: sqlite3.Connection, year: str, every: bool = False) -> tu
     rows.sort(key=lambda r: (0 if r["kind"] == "maybe" else REVIEW_ORDER.get(found.get(r["name"], {}).get("action"), 4),
                              r["name"].lower()))
     return rows, found
+
+
+def carry_html(conn: sqlite3.Connection, year: str, rows: list[dict]) -> str:
+    """One press to mark again the people you marked Not my client the year before."""
+    names = reports.carry_not_mine(conn, year, rows)
+    if not names:
+        return ""
+    prev = str(int(year) - 1)
+    hidden = "".join(f"<input type=hidden name=name value=\"{escape(n)}\">" for n in names)
+    shown = ", ".join(escape(n) for n in names[:12]) + (f" and {len(names) - 12} more" if len(names) > 12 else "")
+    return f"""<div class=note><form method=post action="/not-billed/not-filed">
+    <input type=hidden name=year value="{escape(year)}">
+    <input type=hidden name=back value="/not-billed?year={quote(year)}">{hidden}
+    <p><b>{len(names)} {'person' if len(names) == 1 else 'people'} you marked Not my client for {escape(prev)}</b> {'is' if len(names) == 1 else 'are'}
+      still on this list: <span class=small>{shown}</span></p>
+    <p><button>Mark them Not my client for {escape(year)} too</button>
+      <span class="small muted">You can put anyone back under “Taken off the {escape(year)} list”.</span></p>
+    {'' if db.efiled(conn, year) else f'<p class="small muted">Upload your {escape(year)} e-file list first, so anyone who filed for {escape(year)} is left out.</p>'}
+    </form></div>"""
 
 
 def quick_fixes_html(conn: sqlite3.Connection, year: str, rows: list[dict], found: dict[str, dict]) -> str:
