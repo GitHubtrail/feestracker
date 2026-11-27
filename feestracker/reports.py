@@ -604,3 +604,42 @@ def suggestions(conn: sqlite3.Connection, year: str, rows: list[dict]) -> dict[s
                          "why": "Never invoiced in TaxDome" + (
                              f", and on your ATX lists for {', '.join(on)}" if len(on) > 1 else "") + "."}
     return out
+
+
+def late_bills(conn: sqlite3.Connection, year: str) -> list[dict]:
+    """Bills the app counts for the next tax year that look like they are really this
+    year's late return: the client filed this year, has no invoice for it, and the bill
+    has no year written on it. It is offered when the client has two bills for the next
+    year, or when the next year's accepted e-file list doesn't have them."""
+    if not year.isdigit():
+        return []
+    nxt = str(int(year) + 1)
+    per_invoice = invoice_tax_years(conn)
+    by_hand = db.invoice_years(conn)
+    filed_next = db.efiled(conn, nxt)
+    titles: dict[str, list[str]] = {}
+    for r in conn.execute("SELECT invoice_number, title FROM line_items WHERE kind = 'service'"):
+        titles.setdefault(r["invoice_number"], []).append(r["title"])
+    bills: dict[str, list[dict]] = {}
+    for r in conn.execute("SELECT number, client, invoice_date, description, total_cents, owed_cents "
+                          "FROM invoice_view ORDER BY invoice_date, number"):
+        if per_invoice.get(r["number"]) == {nxt}:
+            bills.setdefault(r["client"], []).append(dict(r))
+    out = []
+    for row in not_billed(conn, year)["rows"]:
+        mine = bills.get(row["client"] or "")
+        if not mine:
+            continue
+        loose = [b for b in mine if b["number"] not in by_hand
+                 and not named_tax_years(b["description"] or "", titles.get(b["number"], []))]
+        if not loose:
+            continue
+        if len(mine) >= 2 or (filed_next and row["name"] not in filed_next):
+            b = loose[0]
+            out.append({"name": row["name"], "client": row["client"], "number": b["number"],
+                        "date": b["invoice_date"][:10], "total_cents": b["total_cents"],
+                        "owed_cents": b["owed_cents"], "two": len(mine) >= 2,
+                        # Sure enough to tick: two bills for next year, or billed after next
+                        # year's extension deadline with no accepted next-year return.
+                        "sure": len(mine) >= 2 or b["invoice_date"][:10] > f"{int(nxt) + 1}-10-15"})
+    return out
