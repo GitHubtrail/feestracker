@@ -91,6 +91,14 @@ CREATE TABLE IF NOT EXISTS not_matches (
     PRIMARY KEY (list_name, client)
 );
 
+-- Names on a year's list that have an accepted federal return that year, from the
+-- e-file list, so "Not my client" answers aren't carried to a year they filed.
+CREATE TABLE IF NOT EXISTS efiled_names (
+    year TEXT NOT NULL,
+    name TEXT NOT NULL,
+    PRIMARY KEY (year, name)
+);
+
 -- Clients billed for a tax year on an invoice the app counts for another year
 -- (one invoice covering 2023 and 2024), so they count as billed for that year.
 CREATE TABLE IF NOT EXISTS covered_years (
@@ -578,6 +586,17 @@ def mark_not_filed(conn: sqlite3.Connection, year: str, names: Iterable[str], fi
         else:
             conn.executemany("INSERT OR IGNORE INTO not_filed (year, name, marked_at) VALUES (?, ?, ?)",
                              [(year, n, now) for n in set(names) if n.strip()])
+
+
+def save_efiled(conn: sqlite3.Connection, year: str, names: Iterable[str]) -> None:
+    with conn:
+        conn.execute("DELETE FROM efiled_names WHERE year = ?", (year,))
+        conn.executemany("INSERT OR IGNORE INTO efiled_names (year, name) VALUES (?, ?)",
+                         [(year, n) for n in set(names)])
+
+
+def efiled(conn: sqlite3.Connection, year: str) -> set[str]:
+    return {r[0] for r in conn.execute("SELECT name FROM efiled_names WHERE year = ?", (year,))}
 
 
 def mark_covered(conn: sqlite3.Connection, year: str, names: Iterable[str], undo: bool = False) -> None:

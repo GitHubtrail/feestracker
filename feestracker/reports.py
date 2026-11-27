@@ -405,7 +405,7 @@ def apply_efiled(conn: sqlite3.Connection, year: str, filed: list[str], source: 
     by_words = {clientlists.words(f): f for f in filed}
     finder = Matcher(filed)
     matched: set[str] = set()
-    not_filed = []
+    not_filed, filed_names = [], []
     for name in names:
         hit = None
         for n in (name, aliases.get(name, "")):
@@ -420,12 +420,23 @@ def apply_efiled(conn: sqlite3.Connection, year: str, filed: list[str], source: 
                     break
         if hit:
             matched.add(hit)
+            filed_names.append(name)
         else:
             not_filed.append(name)
     added = [f for f in filed if f not in matched]
     db.save_client_list(conn, year, names + added, source or (db.client_list_source(conn, year)))
     db.mark_not_filed(conn, year, not_filed)
+    db.save_efiled(conn, year, filed_names + added)
     return {"filed": len(filed), "matched": len(matched), "added": len(added), "not_filed": len(not_filed)}
+
+
+def carry_not_mine(conn: sqlite3.Connection, year: str, rows: list[dict]) -> list[str]:
+    """People still on this year's list whom you marked Not my client the year before,
+    leaving out anyone with an accepted return this year."""
+    before = set(db.not_filed(conn, str(int(year) - 1))) if year.isdigit() else set()
+    filed = db.efiled(conn, year)
+    return [r["client"] or r["name"] for r in rows
+            if (r["name"] in before or (r["client"] or "") in before) and r["name"] not in filed]
 
 
 def not_billed(conn: sqlite3.Connection, year: str) -> dict:
