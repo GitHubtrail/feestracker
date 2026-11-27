@@ -682,3 +682,16 @@ def test_carry_not_my_client_to_next_year(server, tmp_path):
     assert "1 person you marked Not my client for 2023" in html and "Mark the ticked ones Not my client for 2024" in html
     assert post_multi(server, "/not-billed/not-filed", [("name", "Zed Nobody"), ("year", "2024")]) == 303
     assert "you marked Not my client for 2023" not in get(server + "/not-billed?year=2024")
+
+
+def test_carry_outside_bills_to_next_year(server, tmp_path):
+    conn = db.connect(tmp_path / "web.db")
+    db.add_outside_bill(conn, "Quill Omar", "2023", 40000, "2024-03-01", "", 0, "2024-03-01")
+    post_list(server, "2024", "c.csv", b"Name\nQuill Omar\n")
+    html = get(server + "/not-billed?year=2024")
+    assert "1 person you billed outside TaxDome for 2023" in html and 'value="400.00"' in html
+    assert post_multi(server, "/outside", [("back", "/not-billed?year=2024"), ("billed_on", "2025-03-01"),
+                                           ("client", "Quill Omar"), ("year", "2024"), ("note", ""),
+                                           ("amount", "450"), ("received", "")]) == 303
+    html = get(server + "/not-billed?year=2024")
+    assert "billed outside TaxDome for 2023" not in html and "of the 1 return you did for" in html
