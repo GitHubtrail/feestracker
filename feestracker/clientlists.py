@@ -212,7 +212,7 @@ def _returns(header: list[str], rows: list[list[str]]) -> list[tuple[str, str]]:
 # "-1040NR -amended 1", "W7", "-HOH", "- Minor".
 RETURN_SUFFIX = re.compile(
     r"\s*[-,(]?\s*\b(?:ext|es|q\d|1040\w*|amended|w-?7|itin|hoh|mfj|mfs|single|minor|paper|v\d|"
-    r"\d{4}\s*es|filing\s+copy|filed|to\s+file|use\s+this)\b.*$", re.I)
+    r"\d{4}\s*es|filing\s+copy|final\s+return|filed|to\s+file|use\s+this)\b.*$", re.I)
 
 
 def looks_like_efile_list(data: bytes, filename: str = "") -> bool:
