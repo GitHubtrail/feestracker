@@ -287,3 +287,20 @@ def test_suggestions_for_not_billed(conn):
     assert found["Ram Vidal"]["action"] == "same" and found["Ram Vidal"]["client"] == "Vidal Ramon and Ines"
     assert found["Ada Okafor"]["action"] == "bill"
     assert found["Zed Nobody"]["action"] == "free" and "2023, 2024" in found["Zed Nobody"]["why"]
+
+
+def test_one_invoice_with_two_return_lines_covers_two_years(conn):
+    from feestracker import reports
+    _billed(conn, "1", "Quill Omar", "2024-03-01")            # 2023
+    _billed(conn, "2", "Quill Omar", "2026-04-01")            # 2025 and the skipped 2024
+    _billed(conn, "3", "Vale Ivo", "2024-03-01")
+    _billed(conn, "4", "Vale Ivo", "2025-03-01")
+    _billed(conn, "5", "Vale Ivo", "2026-03-01")              # two lines, but 2024 was billed
+    for number in ("2", "5"):
+        for i in range(2):
+            conn.execute("INSERT INTO line_items (invoice_number, kind, position, title, amount_cents, quantity,"
+                         " total_cents) VALUES (?, 'service', ?, ?, 50, '1', 50)",
+                         (number, i, "Preparation of Individual tax returns"))
+    years = reports.client_tax_years(conn)
+    assert years["Quill Omar"] == {"2023", "2024", "2025"}
+    assert years["Vale Ivo"] == {"2023", "2024", "2025"}

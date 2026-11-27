@@ -355,6 +355,10 @@ def tax_years_of(text: str, invoice_date: str, titles: Iterable[str] = ()) -> se
     return {str(int(invoice_date[:4]) - 1)} if invoice_date[:4].isdigit() else set()
 
 
+# A service line for preparing a tax return.
+RETURN_LINE = re.compile(r"return|1040|1120|1065|preparation", re.I)
+
+
 def client_tax_years(conn: sqlite3.Connection) -> dict[str, set[str]]:
     """Per client, the tax years they have been invoiced for.
 
@@ -387,6 +391,13 @@ def client_tax_years(conn: sqlite3.Connection) -> dict[str, set[str]]:
                     and any(int(x) < y - 1 for x in seen)):
                 years = {str(y - 1)}
             inferred.add(next(iter(years)))
+            # The same return line twice on one invoice, and nothing billed for the year
+            # before: one invoice for two years' returns (2024 and 2025 billed together).
+            y = int(next(iter(years)))
+            returns = [t.lower() for t in titles.get(r["number"], []) if RETURN_LINE.search(t)]
+            if (len(returns) != len(set(returns)) and str(y - 1) not in seen and seen
+                    and all(int(x) < y - 1 for x in seen)):
+                years = {str(y - 1), str(y)}
         seen.update(years)
     return out
 
