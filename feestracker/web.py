@@ -956,6 +956,7 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
     <p class="small muted">For each person, press the answer that fits. Anyone you still need to bill, just leave.
       <a href="/not-billed.csv?year={quote(year)}">Download this list</a></p>
     {carry_html(conn, year, nb["rows"])}
+    {carry_outside_html(conn, today, year, nb["rows"])}
     {quick_fixes_html(conn, year, nb["rows"], found)}
     {client_actions(f"""<div class=wrap><table class=list><thead><tr>{TICK_ALL}<th>Client</th><th></th></tr></thead>
       <tbody>{rows or '<tr><td colspan=3 class=muted>Everyone on this list was billed.</td></tr>'}</tbody>
@@ -1031,6 +1032,37 @@ def carry_html(conn: sqlite3.Connection, year: str, rows: list[dict]) -> str:
     <div class=wrap><table class=list><tbody>{''.join(items)}</tbody></table></div>
     <p><button>Mark the ticked ones Not my client for {escape(year)}</button>
       <span class="small muted">You can put anyone back under “Taken off the {escape(year)} list”.</span></p>
+    </form></div>"""
+
+
+def carry_outside_html(conn: sqlite3.Connection, today: date, year: str, rows: list[dict]) -> str:
+    """People on this year's list you billed outside TaxDome last year: add this year's
+    bills in one go, with last year's amount filled in to check."""
+    if not year.isdigit():
+        return ""
+    prev = str(int(year) - 1)
+    last: dict[str, int] = {}
+    for b in db.outside_bills(conn):
+        if b["tax_year"] == prev:
+            last[b["client"]] = last.get(b["client"], 0) + b["total_cents"]
+    found = [(r["client"] or r["name"]) for r in rows if (r["client"] or r["name"]) in last]
+    if not found:
+        return ""
+    items = "".join(
+        f"<tr><td>{escape(n)}<input type=hidden name=client value=\"{escape(n)}\">"
+        f"<input type=hidden name=year value=\"{escape(year)}\"><input type=hidden name=note value=''></td>"
+        f"<td><input name=amount inputmode=decimal size=9 value=\"{last[n] / 100:.2f}\" aria-label='Billed'></td>"
+        f"<td><input name=received inputmode=decimal size=9 placeholder='0.00' aria-label='Received'></td></tr>"
+        for n in found)
+    return f"""<div class=note><form method=post action="/outside">
+    <input type=hidden name=back value="/not-billed?year={quote(year)}">
+    <p><b>{len(found)} {'person' if len(found) == 1 else 'people'} you billed outside TaxDome for {escape(prev)}</b>
+      {'has' if len(found) == 1 else 'have'} no {escape(year)} bill. Their {escape(prev)} amount is filled in: change it to
+      what you billed for {escape(year)}, or clear it for anyone you didn't bill.</p>
+    <div class=wrap><table class=list><thead><tr><th>Client</th><th>Billed for {escape(year)}</th><th>Received</th></tr></thead>
+      <tbody>{items}</tbody></table></div>
+    <p><label>Billed on <input type=date name=billed_on value="{today.isoformat()}" required></label>
+      <button>Add these {escape(year)} bills outside TaxDome</button></p>
     </form></div>"""
 
 
@@ -1925,7 +1957,7 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                     db.add_outside_bill(conn, client, year, cents, billed_on, note, got, received_on)
             finally:
                 conn.close()
-            self._go("/outside")
+            self._go(form.get("back") or "/outside", "/outside")
 
         def _payment(self):
             length = min(int(self.headers.get("Content-Length") or 0), 100_000)
