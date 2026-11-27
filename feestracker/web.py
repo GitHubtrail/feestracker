@@ -1008,16 +1008,29 @@ def carry_html(conn: sqlite3.Connection, year: str, rows: list[dict]) -> str:
     if not names:
         return ""
     prev = str(int(year) - 1)
-    hidden = "".join(f"<input type=hidden name=name value=\"{escape(n)}\">" for n in names)
-    shown = ", ".join(escape(n) for n in names[:12]) + (f" and {len(names) - 12} more" if len(names) > 12 else "")
+    if not db.efiled(conn, year):
+        # Without this year's accepted returns we can't tell who filed, so don't offer it yet.
+        return (f"<div class=note>To carry your {escape(prev)} “Not my client” answers to {escape(year)}, first upload "
+                f"your {escape(year)} e-file list below. Then anyone who filed for {escape(year)} is left out.</div>")
+    by_key = {r["client"] or r["name"]: r for r in rows}
+    items = []
+    for n in names:
+        r = by_key.get(n, {})
+        billed = ", ".join(r.get("tax_years") or [])
+        known = (f"In TaxDome, billed for {escape(billed)}" if billed else
+                 "In TaxDome" if r.get("client") else "Never invoiced in TaxDome")
+        items.append(f"<tr><td class=tick><input type=checkbox name=name value=\"{escape(n)}\" checked></td>"
+                     f"<td>{client_link(r['client']) if r.get('client') else escape(n)}</td>"
+                     f"<td class='small muted'>{known}</td></tr>")
     return f"""<div class=note><form method=post action="/not-billed/not-filed">
     <input type=hidden name=year value="{escape(year)}">
-    <input type=hidden name=back value="/not-billed?year={quote(year)}">{hidden}
-    <p><b>{len(names)} {'person' if len(names) == 1 else 'people'} you marked Not my client for {escape(prev)}</b> {'is' if len(names) == 1 else 'are'}
-      still on this list: <span class=small>{shown}</span></p>
-    <p><button>Mark them Not my client for {escape(year)} too</button>
+    <input type=hidden name=back value="/not-billed?year={quote(year)}">
+    <p><b>{len(names)} {'person' if len(names) == 1 else 'people'} you marked Not my client for {escape(prev)}</b>
+      {'is' if len(names) == 1 else 'are'} still on this list. Untick anyone who was your client in {escape(year)},
+      then press the button.</p>
+    <div class=wrap><table class=list><tbody>{''.join(items)}</tbody></table></div>
+    <p><button>Mark the ticked ones Not my client for {escape(year)}</button>
       <span class="small muted">You can put anyone back under “Taken off the {escape(year)} list”.</span></p>
-    {'' if db.efiled(conn, year) else f'<p class="small muted">Upload your {escape(year)} e-file list first, so anyone who filed for {escape(year)} is left out.</p>'}
     </form></div>"""
 
 
