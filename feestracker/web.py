@@ -21,7 +21,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__, db, reports, storage
-from .clientlists import ListError, looks_like_client_list, names_from_text, read_aliases, read_names
+from .clientlists import (ListError, looks_like_client_list, looks_like_efile_list, names_from_text, read_aliases,
+                          read_efiled, read_names)
 from .taxdome import ImportError_, format_cents, read_invoices
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -965,6 +966,9 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
     upload = f"""<h2 id=upload>Add or replace an ATX list</h2>
     <form method=post action="/not-billed" enctype="multipart/form-data" class="payform">
       <p><label>Tax year <select name=year>{options}</select></label></p>
+      <p class="small muted">You can also upload ATX’s e-file list (accepted returns) for the year.
+        Only accepted federal returns count. Anyone on your ATX list without one is taken off that year
+        as Not my client, and business returns not on the list are added.</p>
       <p><label>Your ATX client list for that tax year (Excel .xlsx or CSV): <input type=file name=file
         accept=".csv,.xlsx,.xlsm,.txt"></label></p>
       <p><label>or paste names, one per line:<br><textarea name=names rows=3></textarea></label></p>
@@ -1734,6 +1738,19 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                 filename, data = form.get("file", ("", b""))
                 pasted = form.get("names", ("", b""))[1].decode("utf-8", "replace")
                 try:
+                    if data and looks_like_efile_list(data, filename):
+                        filed = read_efiled(data, filename)
+                        if not filed:
+                            return reply("That e-file list has no accepted federal returns, so nothing was changed.",
+                                         False, year, status=HTTPStatus.BAD_REQUEST)
+                        n = reports.apply_efiled(conn, year, filed)
+                        return reply(
+                            f"Saved your {escape(year)} accepted returns: {count(n['filed'], 'federal return')}. "
+                            f"{n['matched']} matched your ATX list"
+                            + (f", {n['added']} were added (mostly business returns)" if n['added'] else "")
+                            + (f", and {n['not_filed']} {'person' if n['not_filed'] == 1 else 'people'} with no accepted return "
+                               f"are now under “Taken off the {escape(year)} list” as Not my client. "
+                               "Put back anyone who is." if n['not_filed'] else "."), True, year)
                     if data:
                         names, source = read_names(data, filename), filename
                         db.save_aliases(conn, read_aliases(data, filename))

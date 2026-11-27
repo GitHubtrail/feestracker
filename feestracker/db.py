@@ -317,6 +317,11 @@ def manual_payments(conn: sqlite3.Connection, number: str) -> list[dict]:
         "SELECT * FROM manual_payments WHERE invoice_number = ? ORDER BY paid_on, id", (number,))]
 
 
+def client_list_source(conn: sqlite3.Connection, year: str) -> str:
+    row = conn.execute("SELECT source FROM client_lists WHERE year = ?", (year,)).fetchone()
+    return row[0] if row else ""
+
+
 def save_client_list(conn: sqlite3.Connection, year: str, names: list[str], source: str = "") -> None:
     """Store the client list for a year, replacing any list already saved for it."""
     with conn:

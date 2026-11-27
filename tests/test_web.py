@@ -650,3 +650,22 @@ def test_all_clients_summary(server, tmp_path):
     mine = get(server + "/clients?show=notmine")
     assert "Zed Nobody" in mine and "2023" in mine
     assert "No clients found" in get(server + "/clients?show=inactive")
+
+
+EFILE = (b'"Return Name","Client #","Complete","E-file ID","Jurisdiction","Sub Type","Status","Type"\n'
+         b'"Quill, Omar and Rena - MFJ","","","1","Federal","Federal","AcceptedWithMessages","1040"\n'
+         b'"Quill, Omar and Rena - MFJ","","","2","IL","Return","Accepted","IL-1040"\n'
+         b'"Tarn Holdings Inc","","","3","Federal","Federal","Accepted","1120S"\n'
+         b'"Vale Ivo","","","4","Federal","Extension","Accepted","4868"\n'
+         b'"Moss Ada","","","5","Federal","Federal","RejectedByUser","1040"\n')
+
+
+def test_accepted_returns_list(server, tmp_path):
+    post_list(server, "2023", "c.csv", b"Name\nOmar Quill and Rena Quill\nIvo Vale\nAda Moss\n")
+    status, html = post_list(server, "2023", "E-Files 2023.csv", EFILE)
+    assert status == 200
+    assert "2 federal returns" in html and "1 matched" in html and "1 were added" in html
+    assert "2 people with no accepted return" in html
+    taken = get(server + "/not-billed?year=2023").split("Taken off the 2023 list")[1]
+    assert "Ivo Vale" in taken and "Ada Moss" in taken and "Omar Quill" not in taken
+    assert "Tarn Holdings Inc" in get(server + "/not-billed?year=2023")

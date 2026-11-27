@@ -391,6 +391,43 @@ def client_tax_years(conn: sqlite3.Connection) -> dict[str, set[str]]:
     return out
 
 
+def apply_efiled(conn: sqlite3.Connection, year: str, filed: list[str], source: str = "") -> dict[str, int]:
+    """Use a year's accepted federal returns as the truth for that year's list.
+
+    Returns that match no one on the ATX list (often business returns) are added to it,
+    and people on the list with no accepted return are marked "Not my client" for the
+    year (undone with Put back). Your own marks are left as they are.
+    """
+    if not filed:
+        raise ValueError("no accepted federal returns")
+    names = db.client_list_names(conn, year)
+    aliases = db.list_aliases(conn)
+    by_words = {clientlists.words(f): f for f in filed}
+    finder = Matcher(filed)
+    matched: set[str] = set()
+    not_filed = []
+    for name in names:
+        hit = None
+        for n in (name, aliases.get(name, "")):
+            if n and clientlists.words(n) in by_words:
+                hit = by_words[clientlists.words(n)]
+                break
+        if not hit:
+            for n in (name, aliases.get(name, "")):
+                m = finder.best(n) if n else None
+                if m and m.same:
+                    hit = m.found
+                    break
+        if hit:
+            matched.add(hit)
+        else:
+            not_filed.append(name)
+    added = [f for f in filed if f not in matched]
+    db.save_client_list(conn, year, names + added, source or (db.client_list_source(conn, year)))
+    db.mark_not_filed(conn, year, not_filed)
+    return {"filed": len(filed), "matched": len(matched), "added": len(added), "not_filed": len(not_filed)}
+
+
 def not_billed(conn: sqlite3.Connection, year: str) -> dict:
     """Clients on the client list for a tax year who have no invoice for that tax year.
 
