@@ -132,7 +132,7 @@ def _text_rows(text: str) -> list[list[str]]:
 
 def _looks_like_header(cell: str) -> bool:
     c = cell.strip().lower()
-    return c in NAME_HEADERS or c in ("first name", "last name", "first", "last", "email", "phone")
+    return c in NAME_HEADERS or c in ("first name", "last name", "first", "last", "email", "phone", "return name")
 
 
 def names_from_rows(rows: list[list[str]]) -> list[str]:
@@ -211,8 +211,49 @@ def _returns(header: list[str], rows: list[list[str]]) -> list[tuple[str, str]]:
 # The end of a return name that describes the return, not the client: "-ext", "-ES q2",
 # "-1040NR -amended 1", "W7", "-HOH", "- Minor".
 RETURN_SUFFIX = re.compile(
-    r"\s*[-,]?\s*\b(?:ext|es|q\d|1040\w*|amended|w-?7|itin|hoh|mfj|mfs|single|minor|paper|v\d|"
-    r"\d{4}\s*es)\b.*$", re.I)
+    r"\s*[-,(]?\s*\b(?:ext|es|q\d|1040\w*|amended|w-?7|itin|hoh|mfj|mfs|single|minor|paper|v\d|"
+    r"\d{4}\s*es|filing\s+copy|filed|to\s+file|use\s+this)\b.*$", re.I)
+
+
+def looks_like_efile_list(data: bytes, filename: str = "") -> bool:
+    """Whether a file is the tax software's e-file list (one row per e-filed return,
+    federal and state, with its status), not a return list."""
+    try:
+        rows = _file_rows(data, filename)
+    except ListError:
+        return False
+    header = next(([c.strip().lower() for c in r] for r in rows if any(c.strip() for c in r)), [])
+    return {"return name", "jurisdiction", "status"} <= set(header) and "e-file id" in header
+
+
+def read_efiled(data: bytes, filename: str = "") -> list[str]:
+    """Return names of the accepted federal returns (personal and business) in an e-file
+    list. State returns, extensions and rejected or unsent returns are left out."""
+    rows = [[(c or "").strip() for c in r] for r in _file_rows(data, filename) if any((c or "").strip() for c in r)]
+    if not rows:
+        return []
+    col = {h.lower(): i for i, h in reversed(list(enumerate(rows[0])))}
+
+    def get(r: list[str], h: str) -> str:
+        i = col.get(h)
+        return r[i] if i is not None and i < len(r) else ""
+
+    out = []
+    for r in rows[1:]:
+        if (get(r, "jurisdiction").lower() != "federal" or not get(r, "status").lower().startswith("accepted")
+                or get(r, "sub type").lower() == "extension" or get(r, "type") in ("4868", "7004")
+                or NOT_A_CLIENT.search(get(r, "return name"))):
+            continue
+        name = RETURN_SUFFIX.split(get(r, "return name"))[0]
+        name = re.sub(r"\((?:copy|filing)[^)]*\)", " ", name, flags=re.I)
+        # A note after the name: "Lee Dana - DanaLee", "Ray Ann pspv-6794".
+        trimmed = re.sub(r"(\s+-\s*\S+|\s+\S*\d\S*)$", "", name.strip())
+        if len(trimmed.split()) >= 2:
+            name = trimmed
+        name = _tidy(name.strip(" -,("))
+        if len(re.findall(r"[A-Za-z]", name)) >= 2:
+            out.append(name)
+    return _unique(out)
 
 
 def _tidy(name: str) -> str:
