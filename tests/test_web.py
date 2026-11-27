@@ -564,8 +564,8 @@ def test_quick_fixes_and_one_by_one_review(server, tmp_path):
     conn.commit()
     post_list(server, "2024", "c.csv", b"Name\nNico Rivas\nZed Nobody\n")
     html = get(server + "/not-billed?year=2024")
-    assert "Found 1 answer for you" in html and "Go through the 1 one by one" in html
-    assert "Use these 1, then go through the other 1" in html and "<details><summary>Show them" not in html
+    assert "1 person may be billed on someone else" in html and "Use the ticked answers" in html
+    assert "Never invoiced in TaxDome (2)" in html and "data-g=g1" in html
     assert post_multi(server, "/not-billed/apply", [("year", "2024"),
                                                     ("pick", "Nico Rivas\tRivas Tomas and Lucia\twith")]) == 303
     assert "Billed with Rivas Tomas and Lucia" in get(server + "/not-billed?year=2024")
