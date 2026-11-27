@@ -950,8 +950,8 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
 
         rows = "".join(row(i, r) for i, r in enumerate(nb["rows"]))
         table = f"""
-    <p style="font-size:20px"><b class=owe>{len(nb['rows'])}</b> of {count(nb['listed'], 'return')} on your ATX
-      {escape(year)} list have no {escape(year)} invoice.
+    <p style="font-size:20px"><b class=owe>{len(nb['rows'])}</b> of the {count(nb['filed'], 'return')} you did for
+      {escape(year)} have no {escape(year)} invoice.
       <a class=btn href="/not-billed/review?year={quote(year)}&all=1" style="margin-left:8px">Go through them one at a time</a></p>
     <p class="small muted">For each person, press the answer that fits. Anyone you still need to bill, just leave.
       <a href="/not-billed.csv?year={quote(year)}">Download this list</a></p>

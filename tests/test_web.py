@@ -632,7 +632,7 @@ def test_undo_billed_with_from_review_card(server, tmp_path):
 def test_not_billed_rows_have_answer_buttons(server, tmp_path):
     post_list(server, "2023", "c.csv", b"Name\nZed Nobody\nAmy Other\n")
     html = get(server + "/not-billed?year=2023")
-    assert "of 2 returns on your ATX" in html and "Not my client for 2023" in html
+    assert "of the 2 returns you did for" in html and "Not my client for 2023" in html
     assert "Billed another way" in html and "form=r0" in html
     card = get(server + "/not-billed/review?year=2023&all=1&name=Zed%20Nobody")
     assert "2 of 2" in card and "font-weight:650\">Zed Nobody<" in card
@@ -655,7 +655,7 @@ def test_all_clients_summary(server, tmp_path):
 EFILE = (b'"Return Name","Client #","Complete","E-file ID","Jurisdiction","Sub Type","Status","Type"\n'
          b'"Quill, Omar and Rena - MFJ","","","1","Federal","Federal","AcceptedWithMessages","1040"\n'
          b'"Quill, Omar and Rena - MFJ","","","2","IL","Return","Accepted","IL-1040"\n'
-         b'"Tarn Holdings Inc","","","3","Federal","Federal","Accepted","1120S"\n'
+         b'"Tarn Holdings Inc-1120S","","","3","Federal","Federal","Accepted","1120S"\n'
          b'"Vale Ivo","","","4","Federal","Extension","Accepted","4868"\n'
          b'"Moss Ada","","","5","Federal","Federal","RejectedByUser","1040"\n')
 
@@ -669,3 +669,4 @@ def test_accepted_returns_list(server, tmp_path):
     taken = get(server + "/not-billed?year=2023").split("Taken off the 2023 list")[1]
     assert "Ivo Vale" in taken and "Ada Moss" in taken and "Omar Quill" not in taken
     assert "Tarn Holdings Inc" in get(server + "/not-billed?year=2023")
+    assert "of the 2 returns you did for" in get(server + "/not-billed?year=2023")

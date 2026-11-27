@@ -452,6 +452,7 @@ def not_billed(conn: sqlite3.Connection, year: str) -> dict:
     free = set(db.free_clients(conn))
     inactive = {n for n, y in db.inactive_clients(conn).items() if y <= year}
     rows, off = [], []
+    counted = 0
     for name in names:
         m = taxdome.best(name, rejected.get(name, frozenset()))
         if not m.same and name in aliases:
@@ -471,6 +472,7 @@ def not_billed(conn: sqlite3.Connection, year: str) -> dict:
         if name in not_filed or client in not_filed:
             off.append({"name": shown, "why": f"Not my client for {year}"})
             continue
+        counted += 1  # a return you did for this year
         if name in covered or client in covered:
             off.append({"name": shown, "why": f"Billed for {year} on another invoice"})
             continue
@@ -492,7 +494,7 @@ def not_billed(conn: sqlite3.Connection, year: str) -> dict:
     order = {"in_taxdome": 0, "maybe": 1, "never": 2}
     rows.sort(key=lambda r: (order[r["kind"]], r["name"].lower()))
     off.sort(key=lambda r: (r["why"], r["name"].lower()))
-    return {"year": year, "listed": len(names), "rows": rows, "off": off}
+    return {"year": year, "listed": len(names), "filed": counted, "rows": rows, "off": off}
 
 
 def _first_last(name: str) -> tuple[str, str]:
