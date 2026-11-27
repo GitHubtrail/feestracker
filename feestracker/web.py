@@ -948,12 +948,30 @@ def not_billed_page(conn: sqlite3.Connection, today: date, year: str, message: s
             return (f"<tr>{tick(key)}<td>{name}{alias}<div class='small muted'>{what(r)}</div></td>"
                     f"<td class=small style='white-space:nowrap'>{buttons}</td></tr>")
 
-        rows = "".join(row(i, r) for i, r in enumerate(nb["rows"]))
+        groups = [
+            ("In TaxDome, but no " + year + " invoice",
+             "Bill them, or tick and press an answer above.",
+             [r for r in nb["rows"] if r["client"] or r["maybe"]]),
+            ("Never invoiced in TaxDome",
+             "Tick the ones you do for free or who weren't your client, then press Free return or Not my client above.",
+             [r for r in nb["rows"] if not (r["client"] or r["maybe"])]),
+        ]
+        index = {id(r): i for i, r in enumerate(nb["rows"])}
+        rows = ""
+        for g, (title, hint, members) in enumerate(groups):
+            if not members:
+                continue
+            rows += (f"<tr><th class=tick><input type=checkbox title='Tick all in this group' "
+                     f"onclick=\"for (const b of this.closest('tbody').querySelectorAll('tr[data-g=g{g}] input[type=checkbox]'))"
+                     f" b.checked = this.checked\"></th><th colspan=2>{escape(title)} ({len(members)})"
+                     f"<div class='small muted' style='font-weight:400'>{escape(hint)}</div></th></tr>")
+            rows += "".join(row(index[id(r)], r).replace("<tr>", f"<tr data-g=g{g}>", 1) for r in members)
         table = f"""
     <p style="font-size:20px"><b class=owe>{len(nb['rows'])}</b> of the {count(nb['filed'], 'return')} you did for
       {escape(year)} have no {escape(year)} invoice.
-      <a class=btn href="/not-billed/review?year={quote(year)}&all=1" style="margin-left:8px">Go through them one at a time</a></p>
-    <p class="small muted">For each person, press the answer that fits. Anyone you still need to bill, just leave.
+      <a class=small href="/not-billed/review?year={quote(year)}&all=1" style="margin-left:8px">or one at a time</a></p>
+    <p class="small muted">Tick several people and press one answer for all of them, or use the buttons on a row.
+      Anyone you still need to bill, just leave.
       <a href="/not-billed.csv?year={quote(year)}">Download this list</a></p>
     {carry_html(conn, year, nb["rows"])}
     {carry_outside_html(conn, today, year, nb["rows"])}
@@ -1067,31 +1085,32 @@ def carry_outside_html(conn: sqlite3.Connection, today: date, year: str, rows: l
 
 
 def quick_fixes_html(conn: sqlite3.Connection, year: str, rows: list[dict], found: dict[str, dict]) -> str:
-    """Returns the data settles on its own, ticked, ready to accept in one click."""
-    sure = [r for r in rows if found.get(r["name"], {}).get("sure")]
-    rest = len(rows) - len(sure)
-    review = (f"<a class=btn href='/not-billed/review?year={quote(year)}'>Go through the {rest} one by one</a>"
-              if rest else "")
-    if not sure:
-        return (f"<div class=note><b>{count(rest, 'return')} to look at.</b> Answer one at a time with one click. "
-                f"{review}</div>") if rest else ""
+    """Every relative / company / same-client guess in one box: sure ones ticked, the
+    rest unticked, so they are answered in one press instead of one at a time."""
+    guessed = [r for r in rows if found.get(r["name"], {}).get("action") in ("with", "same")]
+    if not guessed:
+        return ""
+    guessed.sort(key=lambda r: (not found[r["name"]].get("sure"), r["name"].lower()))
     items = []
-    for r in sure:
+    for r in guessed:
         f = found[r["name"]]
         target = f.get("company") or f.get("client")
         value = escape(f"{r['client'] or r['name']}\t{target}\t{f['action']}")
         what = "same client as" if f["action"] == "same" else "billed with"
-        items.append(f"<tr><td class=tick><input type=checkbox name=pick value=\"{value}\" checked></td>"
+        items.append(f"<tr><td class=tick><input type=checkbox name=pick value=\"{value}\""
+                     f"{' checked' if f.get('sure') else ''}></td>"
                      f"<td>{escape(r['name'])}</td><td>{what} {client_link(target)}</td>"
                      f"<td class='small muted'>{escape(f['why'])}</td></tr>")
+    sure = sum(1 for r in guessed if found[r["name"]].get("sure"))
     return f"""<div class=note>
     <form method=post action="/not-billed/apply">
     <input type=hidden name=year value="{escape(year)}">
-    <p><b>Found {count(len(sure), 'answer')} for you.</b> Untick any that are wrong, then press the button.
+    <p><b>{len(guessed)} {'person' if len(guessed) == 1 else 'people'} may be billed on someone else’s invoice.</b>
+      {('I’m sure of this one, so it’s ticked. ' if len(guessed) == 1 else f'The {sure} I’m sure of are ticked. ') if sure else ''}Tick the ones that are right, then press the button once.
       You can put them back later under “Taken off the {escape(year)} list”.</p>
-    <div class=wrap><table class=list><tbody>{''.join(items)}</tbody></table></div>
-    <p><button>{f'Use these {len(sure)}, then go through the other {rest}' if rest else f'Use these {len(sure)} answers'}</button>
-      {f'<span class=small style="margin-left:8px">or</span> {review}' if review else ''}</p>
+    <div class=wrap><table class=list><thead><tr>{TICK_ALL}<th>On your list</th><th>Guess</th><th>Why</th></tr></thead>
+      <tbody>{''.join(items)}</tbody></table></div>
+    <p><button>Use the ticked answers</button></p>
     </form></div>"""
 
 
@@ -1746,11 +1765,9 @@ def make_handler(db_path: Path, today_fn=date.today, update_fn=storage.update_ap
                     else:
                         continue
                     used += 1
-                rest = len(review_queue(conn, year)[0]) if year in [l["year"] for l in db.client_lists(conn)] else 0
             finally:
                 conn.close()
-            where = "/not-billed/review" if rest else "/not-billed"
-            self._go(f"{where}?year={quote(year)}&used={used}", "/not-billed")
+            self._go(f"/not-billed?year={quote(year)}&used={used}", "/not-billed")
 
         def _confirm_match(self, same: bool = True):
             length = min(int(self.headers.get("Content-Length") or 0), 1_000_000)
