@@ -1100,15 +1100,19 @@ def quick_fixes_html(conn: sqlite3.Connection, year: str, rows: list[dict], foun
         items.append(f"<tr><td class=tick><input type=checkbox name=pick value=\"{value}\""
                      f"{' checked' if f.get('sure') else ''}></td>"
                      f"<td>{escape(r['name'])}</td><td>{what} {client_link(target)}</td>"
-                     f"<td class='small muted'>{escape(f['why'])}</td></tr>")
+                     f"<td class='small muted'>{escape(f['why'])}</td>"
+                     f"<td><button class='small secondary' formaction='/not-billed/not-match' name=match "
+                     f"value=\"{escape(r['name'] + chr(9) + target)}\" title=\"Different clients. This guess won't be shown again.\">"
+                     f"{'Not family' if 'Family' in f.get('why', '') else 'Not them'}</button></td></tr>")
     sure = sum(1 for r in guessed if found[r["name"]].get("sure"))
     return f"""<div class=note>
     <form method=post action="/not-billed/apply">
     <input type=hidden name=year value="{escape(year)}">
+    <input type=hidden name=back value="/not-billed?year={quote(year)}">
     <p><b>{len(guessed)} {'person' if len(guessed) == 1 else 'people'} may be billed on someone else’s invoice.</b>
-      {('I’m sure of this one, so it’s ticked. ' if len(guessed) == 1 else f'The {sure} I’m sure of are ticked. ') if sure else ''}Tick the ones that are right, then press the button once.
+      {('I’m sure of this one, so it’s ticked. ' if len(guessed) == 1 else f'The {sure} I’m sure of are ticked. ') if sure else ''}Tick the ones that are right, then press the button once. A wrong guess? Press Not family and it won’t come back.
       You can put them back later under “Taken off the {escape(year)} list”.</p>
-    <div class=wrap><table class=list><thead><tr>{TICK_ALL}<th>On your list</th><th>Guess</th><th>Why</th></tr></thead>
+    <div class=wrap><table class=list><thead><tr>{TICK_ALL}<th>On your list</th><th>Guess</th><th>Why</th><th></th></tr></thead>
       <tbody>{''.join(items)}</tbody></table></div>
     <p><button>Use the ticked answers</button></p>
     </form></div>"""

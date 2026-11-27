@@ -566,6 +566,7 @@ def test_quick_fixes_and_one_by_one_review(server, tmp_path):
     html = get(server + "/not-billed?year=2024")
     assert "1 person may be billed on someone else" in html and "Use the ticked answers" in html
     assert "Never invoiced in TaxDome (2)" in html and "data-g=g1" in html
+    assert "Not them</button>" in html  # every guess can be turned down right in the box
     assert post_multi(server, "/not-billed/apply", [("year", "2024"),
                                                     ("pick", "Nico Rivas\tRivas Tomas and Lucia\twith")]) == 303
     assert "Billed with Rivas Tomas and Lucia" in get(server + "/not-billed?year=2024")
